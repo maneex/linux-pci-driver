@@ -1,0 +1,91 @@
+# devtools/config.defaults -- default configuration for the Velocitor
+# development environment.
+#
+# Adapted from sysprog21/lkmpg, devtools/config.defaults -- see README.md.
+#
+# Override any scalar from the environment, or -- better -- create
+# devtools/config.local (gitignored), which is sourced after this file and
+# therefore wins over both.
+
+# --- Guest kernel (pinned, spec section C.4) --------------------------------
+KERNEL_VERSION="${KERNEL_VERSION:-6.18.44}"
+KERNEL_MAJOR="${KERNEL_VERSION%%.*}"
+KERNEL_URL_PRIMARY="https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_MAJOR}.x/linux-${KERNEL_VERSION}.tar.xz"
+KERNEL_URL_GITHUB="https://github.com/gregkh/linux/archive/refs/tags/v${KERNEL_VERSION}.tar.gz"
+
+# --- QEMU (pinned, spec section C.4) ----------------------------------------
+# Built from the upstream tag, never from the distribution package: the
+# device model is an in-tree device and has to be compiled with the tree.
+QEMU_VERSION="${QEMU_VERSION:-7.2.22}"
+QEMU_URL_PRIMARY="https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz"
+QEMU_GIT_URL="${QEMU_GIT_URL:-https://gitlab.com/qemu-project/qemu.git}"
+
+# --- Busybox (statically linked, for the initramfs) -------------------------
+BUSYBOX_VERSION="${BUSYBOX_VERSION:-1.37.0}"
+BUSYBOX_URL="https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"
+
+# --- Paths (everything under .cache to keep the project root clean) ---------
+CACHE_DIR="${CACHE_DIR:-$DEVTOOLS_DIR/.cache}"
+KERNEL_SRC="$CACHE_DIR/linux-${KERNEL_VERSION}"
+KERNEL_BUILD="$CACHE_DIR/kernel-build"
+BUSYBOX_SRC="$CACHE_DIR/busybox-${BUSYBOX_VERSION}"
+INITRAMFS_DIR="$CACHE_DIR/initramfs"
+INITRAMFS_CPIO="$CACHE_DIR/initramfs.cpio.gz"
+QEMU_SRC="$CACHE_DIR/qemu-${QEMU_VERSION}"
+QEMU_BUILD="$QEMU_SRC/build"
+QEMU_BIN="${QEMU_BIN:-$QEMU_BUILD/qemu-system-x86_64}"
+
+# Project paths.  MODULE_DIR is built, never edited, by these scripts.
+MODULE_DIR="$PROJECT_ROOT/module"
+DEVICE_DIR="$PROJECT_ROOT/qemu-device"
+
+# --- Guest runtime ----------------------------------------------------------
+# q35 is required, not a preference: velocitor is a PCI Express endpoint
+# (spec section 3) and a conventional PCI bus will refuse it.  It is also the
+# machine the vIOMMU experiment of spec section 14 needs.
+QEMU_MACHINE="${QEMU_MACHINE:-q35}"
+QEMU_MEM="${QEMU_MEM:-1G}"
+QEMU_SMP="${QEMU_SMP:-2}"
+QEMU_GDB_PORT="${QEMU_GDB_PORT:-1234}"
+
+# Spec section 2: VEL_HOST_POOL_SIZE is 64 MiB, well past MAX_PAGE_ORDER.
+# dma_alloc_coherent() cannot serve that without CMA, so the guest reserves
+# a CMA area at boot.  Step 0 prerequisite, not a comfort setting.
+GUEST_CMA="${GUEST_CMA:-128M}"
+
+# Seconds the kernel waits after a panic before rebooting.  QEMU runs with
+# -no-reboot, so that reboot terminates QEMU instead: a panic gives back the
+# terminal rather than hanging on it, and --test mode fails fast instead of
+# sitting until its timeout.  You are going to panic this guest often -- it
+# is a driver project.  Set to 0 to keep the kernel sitting on the panic.
+GUEST_PANIC_TIMEOUT="${GUEST_PANIC_TIMEOUT:-1}"
+
+# Appended to the guest kernel command line, e.g. "intel_iommu=on".
+# Appended last, so it can override anything set above -- "panic=0" included.
+KERNEL_CMDLINE_EXTRA="${KERNEL_CMDLINE_EXTRA:-}"
+
+# 9p share: the project root shows up at $GUEST_SHARE_DIR inside the guest.
+GUEST_SHARE_TAG="${GUEST_SHARE_TAG:-velocitor}"
+GUEST_SHARE_DIR="${GUEST_SHARE_DIR:-/mnt/velocitor}"
+
+# --- QEMU build -------------------------------------------------------------
+# Redefine the whole array in config.local to change it.  Kept short on
+# purpose: every option here is one that has existed under this name for
+# years, so configure will not reject it on a different point release.
+QEMU_CONFIGURE_EXTRA=(
+    # virtfs is what carries the 9p share, and it is auto-detected: without
+    # libcap-ng-dev and libattr1-dev it silently turns itself off and boot.sh
+    # then fails on "virtio-9p-pci is not a valid device model name", which
+    # says nothing about the real cause.  Asking for it explicitly makes
+    # configure fail here instead, with the reason.
+    --enable-virtfs
+    --disable-docs
+    --disable-tools
+    --disable-guest-agent
+    --disable-gtk
+    --disable-sdl
+    --disable-vnc
+    --disable-curses
+    --disable-spice
+    --disable-werror
+)

@@ -1,0 +1,87 @@
+#!/bin/sh
+# PID 1 for the Velocitor QEMU guest.
+#
+# Adapted from sysprog21/lkmpg, devtools/initramfs/init -- see README.md.
+#
+# Mounts the essential filesystems, shares the host project root over 9p,
+# and either drops to an interactive shell or runs one command and halts.
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+mount -t tmpfs tmpfs /tmp
+
+SHARE_DIR=/mnt/velocitor
+SHARE_TAG=velocitor
+
+mkdir -p "$SHARE_DIR"
+if ! mount -t 9p -o trans=virtio,version=9p2000.L "$SHARE_TAG" "$SHARE_DIR" 2>/dev/null; then
+    echo "WARNING: 9p mount failed. $SHARE_DIR/ will be empty."
+    echo "Make sure QEMU was launched with -virtfs for $SHARE_TAG."
+fi
+
+# Test mode.  boot.sh passes the command base64-encoded via velocitor.cmd64=
+# so it survives kernel command line word splitting.
+TESTCMD=""
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        velocitor.cmd64=*) TESTCMD=$(echo "${arg#velocitor.cmd64=}" | base64 -d) ;;
+    esac
+done
+
+if [ -n "$TESTCMD" ]; then
+    echo "=== velocitor test mode ==="
+    /bin/sh -c "$TESTCMD"
+    RESULT=$?
+    echo "=== test exited with code $RESULT ==="
+    poweroff -f
+    exit "$RESULT"
+fi
+
+echo "================================================================"
+echo "  velocitor QEMU guest"
+echo "  Project:  $SHARE_DIR/"
+echo "  Device:   lspci   (busybox applet: expect 'Class 1200: 1b36:0100')"
+echo "            grep . /sys/bus/pci/devices/*/vendor"
+echo "  Module:   insmod $SHARE_DIR/module/velocitor.ko"
+echo "            dmesg | tail"
+echo "            rmmod velocitor"
+echo "  Exit:     Ctrl+D, 'exit' or 'poweroff -f'  -- shuts the guest down"
+echo "            Ctrl-A X                         -- kills QEMU from anywhere,"
+echo "                                                including from a panic"
+echo "================================================================"
+export PS1='velocitor:\w# '
+
+# Give the shell a controlling terminal.  Inherited from init, its stdin is
+# /dev/console, which cannot serve as one: busybox then says "can't access
+# tty; job control turned off" and, worse for a driver project, Ctrl-C does
+# nothing -- delivering it needs a foreground process group on a controlling
+# tty, and there is none.  So find the real device behind the console and let
+# setsid -c claim it.
+CONSOLE_TTY=$(sed 's/.* //' /sys/class/tty/console/active 2>/dev/null)
+if [ -n "$CONSOLE_TTY" ] && [ -c "/dev/$CONSOLE_TTY" ] && \
+   setsid -c true < "/dev/$CONSOLE_TTY" > "/dev/$CONSOLE_TTY" 2>&1; then
+    run_shell() { setsid -c /bin/sh < "/dev/$CONSOLE_TTY" > "/dev/$CONSOLE_TTY" 2>&1; }
+else
+    run_shell() { /bin/sh; }
+fi
+
+# The shell must not be PID 1.  exec'ing it here would turn Ctrl+D -- an
+# ordinary EOF -- into "init exited", which the kernel answers with
+# "Attempted to kill init!" and a panic, leaving the terminal stuck.  Running
+# it as a child instead lets Ctrl+D and `exit` mean "shut this VM down", the
+# way they do in any other terminal.
+#
+# The loop only matters if poweroff somehow fails: it hands the shell back
+# rather than falling off the end of init, which would panic just the same.
+while true; do
+    run_shell
+    echo ""
+    echo "shell exited -- powering down"
+    poweroff -f
+done
