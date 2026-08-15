@@ -6,7 +6,7 @@
 #include "../include/pci.h"
 #include "device.h"
 
-static struct pci_device_id pci_id_table[] = {
+static const struct pci_device_id pci_id_table[] = {
     {PCI_DEVICE(VELOCITOR_PCI_VENDORID, VELOCITOR_PCI_DEVICEID)},
     {
         0,
@@ -42,7 +42,9 @@ static int velocitor_release(struct pci_dev *dev,
     fallthrough;
 
   case INIT_STATE_ENABLED:
-    break;
+    pci_disable_device(dev);
+    fallthrough;
+
   case INIT_STATE_PROBED:
     break;
   }
@@ -66,6 +68,19 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
   }
   pr_info("velocitor.bar0: magic verified");
 
+  // Check SCRATCH
+  const u32 scratches[] = {0x42000042, 0x12345678};
+  for (int i = 0; i < 2; ++i) {
+    writel(scratches[i], device->bar0 + BAR0_SCRATCH_OFFSET);
+    u32 res = readl(device->bar0 + BAR0_SCRATCH_OFFSET);
+    if (~scratches[i] != res) {
+      dev_err(&dev->dev,
+              "velocitor.bar0: invalid scratch: got 0x%08x, expected 0x%08x\n",
+              res, ~scratches[i]);
+      return -ENODEV;
+    }
+  }
+
   return 0;
 }
 
@@ -78,18 +93,17 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   if (NULL == device)
     return -ENOMEM;
   pci_set_drvdata(dev, device);
-
-  pr_info("velocitor.pci_probe[%s]: device found", pci_name(dev));
+  pr_info("velocitor.[%s].pci_probe: device found", pci_name(dev));
 
   //  Enable the device
-  if ((err = pcim_enable_device(dev)))
+  if ((err = pci_enable_device(dev)))
     return velocitor_release(dev, INIT_STATE_PROBED, err);
   pr_info("velocitor.pci_probe[%s]: device enabled", pci_name(dev));
 
   // Request MMIO/IOP resources
   if ((err = pci_request_regions(dev, KBUILD_MODNAME)))
     return velocitor_release(dev, INIT_STATE_ENABLED, err);
-  pr_info("velocitor.pci_probe[%s]: request regions as %s", pci_name(dev),
+  pr_info("velocitor.[%s].pci_probe: request regions as %s", pci_name(dev),
           KBUILD_MODNAME);
 
   if ((err = initialize_bar0(dev, device)))
@@ -101,6 +115,8 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   // Register IRQ handler (request_irq())
   // Initialize non-PCI (i.e. LAN/SCSI/etc parts of the chip)
   // Enable DMA/processing engines
+
+  pr_info("velocitor.[%s].pci_probe: innitialisation complete", pci_name(dev));
 
   return 0;
 }

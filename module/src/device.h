@@ -15,6 +15,6 @@ enum InitialisationState {
 };
 
 #define BAR0_MAGIC_VALUE 0x4F4C4556
-#define BAR0_MAGIC_OFFSET 0
-
+#define BAR0_MAGIC_OFFSET 0x000
+#define BAR0_SCRATCH_OFFSET 0x00C
 #endif // not VELOCITOR_DEVICE_H
