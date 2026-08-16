@@ -11,6 +11,7 @@ enum InitialisationState {
   INIT_STATE_PROBED,
   INIT_STATE_ENABLED,
   INIT_STATE_IOMAP,
+  INIT_STATE_DMA,
   INIT_STATE_COMPLETE
 };
 
@@ -18,4 +19,6 @@ enum InitialisationState {
 #define BAR0_MAGIC_OFFSET 0x000
 #define BAR0_VERSION_OFFSET 0X004
 #define BAR0_SCRATCH_OFFSET 0x00C
+#define BAR0_DMABITS_OFFSET 0x018
+
 #endif // not VELOCITOR_DEVICE_H

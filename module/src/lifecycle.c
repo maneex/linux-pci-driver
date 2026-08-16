@@ -31,6 +31,10 @@ static int velocitor_release(struct pci_dev *dev,
   case INIT_STATE_COMPLETE:
     fallthrough;
 
+  case INIT_STATE_DMA:
+    pci_clear_master(dev);
+    fallthrough;
+
   case INIT_STATE_IOMAP: // Release MMIO/IOP resources
     if (NULL != device->bar0)
       pci_iounmap(dev, device->bar2);
@@ -88,9 +92,33 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
   return 0;
 }
 
+static int initialize_bar2(struct pci_dev *dev, struct Device *device) {
+  device->bar2 = pci_iomap(dev, 2, 0);
+  if (NULL == device->bar2)
+    return -ENOMEM;
+
+  return 0;
+}
+
+static int initialize_bar4(struct pci_dev *dev, struct Device *device) {
+  device->bar4 = pci_iomap(dev, 4, 0);
+  if (NULL == device->bar4)
+    return -ENOMEM;
+  return 0;
+}
+
+static int initialize_dma_engine(struct pci_dev *dev, struct Device *device) {
+  int err = 0;
+  pci_set_master(dev);
+  u32 dma_width = readl(device->bar0 + BAR0_DMABITS_OFFSET);
+  if ((err = dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(dma_width))))
+    return err;
+  dev_info(&dev->dev, "velocitor.dma.init: %d bits", dma_width);
+  return 0;
+}
+
 static int velocitor_pci_probe(struct pci_dev *dev,
                                const struct pci_device_id *device_id) {
-
   int err = 0;
   struct Device *device =
       devm_kzalloc(&(dev->dev), sizeof(struct Device), GFP_KERNEL);
@@ -112,8 +140,15 @@ static int velocitor_pci_probe(struct pci_dev *dev,
 
   if ((err = initialize_bar0(dev, device)))
     return velocitor_release(dev, INIT_STATE_IOMAP, err);
+  if ((err = initialize_bar2(dev, device)))
+    return velocitor_release(dev, INIT_STATE_IOMAP, err);
+  if ((err = initialize_bar4(dev, device)))
+    return velocitor_release(dev, INIT_STATE_IOMAP, err);
 
   // Set the DMA mask size (for both coherent and streaming DMA)
+  if ((err = initialize_dma_engine(dev, device)))
+    return velocitor_release(dev, INIT_STATE_DMA, err);
+
   // Allocate and initialize shared control data (pci_allocate_coherent())
   // Access device configuration space (if needed)
   // Register IRQ handler (request_irq())
