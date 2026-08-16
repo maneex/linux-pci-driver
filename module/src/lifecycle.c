@@ -81,6 +81,10 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
     }
   }
 
+  u32 version = readl(device->bar0 + BAR0_VERSION_OFFSET);
+  pr_info("velocitor.bar0: device version %d.%d", version >> 16,
+          version & 0xff);
+
   return 0;
 }
 
