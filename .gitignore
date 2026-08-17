@@ -1,0 +1,14 @@
+# Build environment: kernel source and build, busybox, initramfs, QEMU tree.
+# Everything here is reproducible from devtools/ and weighs several GiB.
+devtools/.cache/
+devtools/config.local
+
+# VM images
+vm/*.iso
+vm/*.img
+vm/*.qcow2
+
+# Editor backups
+*~
+*.orig
+*.rej
