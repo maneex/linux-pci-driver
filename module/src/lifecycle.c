@@ -103,7 +103,7 @@ static int initialize_bar2(struct pci_dev *dev, struct Device *device) {
 static int initialize_dma_engine(struct pci_dev *dev, struct Device *device) {
   int err = 0;
   pci_set_master(dev);
-  if ((err = dma_set_mask_and_coherent(&dev->dev, VEL_DMA_BITS)))
+  if ((err = dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(VEL_DMA_BITS))))
     return err;
   dev_info(&dev->dev, "dma: width %d bits", VEL_DMA_BITS);
   return 0;
