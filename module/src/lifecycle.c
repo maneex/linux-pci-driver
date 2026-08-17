@@ -5,6 +5,7 @@
 
 #include "../include/pci.h"
 #include "device.h"
+#include "irq.h"
 
 static const struct pci_device_id pci_id_table[] = {
     {PCI_DEVICE(VELOCITOR_PCI_VENDORID, VELOCITOR_PCI_DEVICEID)},
@@ -17,10 +18,6 @@ static const struct pci_device_id pci_id_table[] = {
 static int velocitor_release(struct pci_dev *dev,
                              enum InitialisationState state, int ret) {
   struct Device *device = pci_get_drvdata(dev);
-
-  // Disable the device from generating IRQs
-  if (INIT_STATE_PROBED != state)
-    pci_disable_device(dev);
 
   // Release the IRQ (free_irq())
   // Stop all DMA activity
@@ -37,7 +34,7 @@ static int velocitor_release(struct pci_dev *dev,
 
   case INIT_STATE_IOMAP: // Release MMIO/IOP resources
     if (NULL != device->bar0)
-      pci_iounmap(dev, device->bar2);
+      pci_iounmap(dev, device->bar0);
     if (NULL != device->bar2)
       pci_iounmap(dev, device->bar2);
     if (NULL != device->bar4)
@@ -117,6 +114,45 @@ static int initialize_dma_engine(struct pci_dev *dev, struct Device *device) {
   return 0;
 }
 
+// https://docs.kernel.org/PCI/msi-howto.html
+// https://kernel-internals.org/interrupts/threaded-irq/
+static int initialize_irq_handlers(struct pci_dev *dev, struct Device *device) {
+  dev_info(&dev->dev, "irq.alloc");
+  int err = 0;
+  if ((6 != pci_alloc_irq_vectors(dev, 6, 6, PCI_IRQ_MSIX)))
+    return err;
+
+  dev_info(&dev->dev, "irq.vectors");
+  // FIXME! IRQ handler affinity ?
+  // FIXME! Threaded IRQ ?
+  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 0),
+                              irq_config_event, 0, "velocitor-cfg", dev)))
+    return err;
+  dev_info(&dev->dev, "irq.cfg");
+  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 1),
+                              irq_queue0_event, 0, "velocitor-q0", dev)))
+    return err;
+  dev_info(&dev->dev, "irq.q0");
+  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 2),
+                              irq_queue1_event, 0, "velocitor-q1", dev)))
+    return err;
+  dev_info(&dev->dev, "irq.q1");
+  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 3),
+                              irq_queue2_event, 0, "velocitor-q2", dev)))
+    return err;
+  dev_info(&dev->dev, "irq.q2");
+  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 4),
+                              irq_queue3_event, 0, "velocitor-q3", dev)))
+    return err;
+  dev_info(&dev->dev, "irq.q3");
+
+  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 5),
+                              irq_error_event, 0, "velocitor-err", dev)))
+    return err;
+  dev_info(&dev->dev, "irq.err");
+  return 0;
+}
+
 static int velocitor_pci_probe(struct pci_dev *dev,
                                const struct pci_device_id *device_id) {
   int err = 0;
@@ -146,12 +182,15 @@ static int velocitor_pci_probe(struct pci_dev *dev,
     return velocitor_release(dev, INIT_STATE_IOMAP, err);
 
   // Set the DMA mask size (for both coherent and streaming DMA)
+  // Allocate and initialize shared control data (pci_allocate_coherent())
   if ((err = initialize_dma_engine(dev, device)))
     return velocitor_release(dev, INIT_STATE_DMA, err);
 
-  // Allocate and initialize shared control data (pci_allocate_coherent())
   // Access device configuration space (if needed)
   // Register IRQ handler (request_irq())
+  if ((err = initialize_irq_handlers(dev, device)))
+    return velocitor_release(dev, INIT_STATE_DMA, err);
+
   // Initialize non-PCI (i.e. LAN/SCSI/etc parts of the chip)
   // Enable DMA/processing engines
 

@@ -1,5 +1,6 @@
 obj-m += velocitor.o
 velocitor-y := src/lifecycle.o
+velocitor-y += src/irq.o
 
 ccflags-y += -I$(src)/include
 
