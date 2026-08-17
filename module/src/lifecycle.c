@@ -12,6 +12,7 @@ static const struct pci_device_id pci_id_table[] = {
     {
         0,
     }};
+MODULE_DEVICE_TABLE(pci, pci_id_table);
 
 // https : // www.kernel.org/doc/html/v6.0/PCI/pci.html
 
