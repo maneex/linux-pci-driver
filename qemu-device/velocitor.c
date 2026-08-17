@@ -13,6 +13,8 @@
  *   - the three BARs, with contractual type and size, so lspci and the
  *     driver see the final layout             (spec 3)
  *   - the BAR0 identity block and SCRATCH     (spec 4.1)
+ *   - the counter block, CNT_SNAP and CNT_RESET
+ *                                             (spec 4.5)
  *   - the BAR0 access rules: 32-bit aligned only, reserved offsets read 0
  *                                             (spec 4)
  *
@@ -48,6 +50,16 @@ struct VelocitorState {
     MemoryRegion bar4;      /* MSI-X tables, spec section 3               */
 
     uint32_t scratch;       /* 0x00C -- mapping probe, spec section 4.1   */
+
+    /*
+     * Counters, spec section 4.5.  Two copies on purpose: cnt[] is what the
+     * engines increment, cnt_snap[] is what reads answer.  Writing CNT_SNAP
+     * copies one to the other, which is what makes a series of reads
+     * mutually consistent without any read having a side effect (annex A.3),
+     * and what lets VEL_IOC_STATS and the debugfs "counters" file coexist.
+     */
+    uint32_t cnt[VEL_CNT_COUNT];
+    uint32_t cnt_snap[VEL_CNT_COUNT];
 };
 
 /* ------------------------------------------------------------------ */
@@ -119,6 +131,16 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
         return ~0ULL;
     }
 
+    /*
+     * Counters answer from the snapshot, never from the live values.  A
+     * driver that has not written CNT_SNAP therefore reads zeroes rather
+     * than a torn set -- including for the four 64-bit counters, whose LO
+     * and HI halves cannot drift apart between two reads.
+     */
+    if (addr >= VEL_CNT_FIRST && addr <= VEL_CNT_LAST) {
+        return s->cnt_snap[VEL_CNT_INDEX(addr)];
+    }
+
     switch (addr) {
     case VEL_REG_MAGIC:
         return VEL_MAGIC;
@@ -136,6 +158,19 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
         return VEL_TOPOLOGY;
     case VEL_REG_DMA_BITS:
         return VEL_DMA_BITS;
+
+    case VEL_REG_CNT_RESET:
+    case VEL_REG_CNT_SNAP:
+        /*
+         * Write-only with a side effect (annex A.3): the model answers all
+         * ones so that a driver reading them is caught on the spot rather
+         * than silently getting a plausible zero.
+         */
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: read of write-only register 0x%" HWADDR_PRIx
+                      " (spec annex A.3) -- returns all ones\n", addr);
+        return ~0U;
+
     default:
         qemu_log_mask(LOG_UNIMP,
                       "velocitor: BAR0 read at 0x%" HWADDR_PRIx
@@ -154,9 +189,36 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
         return;
     }
 
+    /* Counters are the device's own truth: read-only to the driver. */
+    if (addr >= VEL_CNT_FIRST && addr <= VEL_CNT_LAST) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: write 0x%08x to read-only counter"
+                      " 0x%" HWADDR_PRIx " (spec 4.5) -- ignored\n",
+                      (uint32_t)val, addr);
+        return;
+    }
+
     switch (addr) {
     case VEL_REG_SCRATCH:
         s->scratch = (uint32_t)val;
+        return;
+
+    case VEL_REG_CNT_SNAP:
+        /*
+         * Freeze every counter at once (spec 4.5).  The spec says "write 1";
+         * acting on bit 0 keeps a driver that writes a wider flag word from
+         * silently doing nothing.
+         */
+        if (val & 1) {
+            memcpy(s->cnt_snap, s->cnt, sizeof(s->cnt));
+        }
+        return;
+
+    case VEL_REG_CNT_RESET:
+        if (val & 1) {
+            memset(s->cnt, 0, sizeof(s->cnt));
+            memset(s->cnt_snap, 0, sizeof(s->cnt_snap));
+        }
         return;
 
     case VEL_REG_MAGIC:
@@ -287,15 +349,19 @@ static void velocitor_reset(DeviceState *dev)
     VelocitorState *s = VELOCITOR(dev);
 
     s->scratch = 0;
+    memset(s->cnt, 0, sizeof(s->cnt));
+    memset(s->cnt_snap, 0, sizeof(s->cnt_snap));
 }
 
 static const VMStateDescription vmstate_velocitor = {
     .name = "velocitor",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, VelocitorState),
         VMSTATE_UINT32(scratch, VelocitorState),
+        VMSTATE_UINT32_ARRAY(cnt, VelocitorState, VEL_CNT_COUNT),
+        VMSTATE_UINT32_ARRAY(cnt_snap, VelocitorState, VEL_CNT_COUNT),
         VMSTATE_END_OF_LIST()
     },
 };

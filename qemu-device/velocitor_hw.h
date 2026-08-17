@@ -171,6 +171,18 @@
 #define VEL_REG_CNT_CYCLES_E0        0x0E0u
 #define VEL_REG_CNT_CYCLES_E1        0x0E4u
 
+/*
+ * The readable counters are contiguous and 32-bit, so both sides index the
+ * block rather than enumerate it -- same three values, same arithmetic, no
+ * chance of the two implementations disagreeing on how many there are.
+ * CNT_RESET and CNT_SNAP are deliberately outside the range: they are
+ * write-only with a side effect (annex A.3).
+ */
+#define VEL_CNT_FIRST       VEL_REG_CNT_DB_RX
+#define VEL_CNT_LAST        VEL_REG_CNT_CYCLES_E1
+#define VEL_CNT_COUNT       (((VEL_CNT_LAST - VEL_CNT_FIRST) / 4u) + 1u)
+#define VEL_CNT_INDEX(off)  (((off) - VEL_CNT_FIRST) / 4u)
+
 /* ---- shadow resource table, section 4.2 ---- */
 #define VEL_REG_RSC_ADDR_LO     0x0F0u
 #define VEL_REG_RSC_ADDR_HI     0x0F4u

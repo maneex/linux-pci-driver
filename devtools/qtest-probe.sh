@@ -58,7 +58,21 @@ CHECKS=(
     "8-byte read is all ones   |readq $((BAR0 + 0x00))|0xffffffffffffffff"
     "unaligned read is all ones|readl $((BAR0 + 0x02))|0x00000000ffffffff"
     "reserved offset reads 0   |readl $((BAR0 + 0xf00))|0x0000000000000000"
-    "counters block reads 0    |readl $((BAR0 + 0x98))|0x0000000000000000"
+
+    # Counters, spec 4.5.  Nothing increments them yet, so the values are all
+    # zero; what is checked here is the mechanism -- the block is readable,
+    # the snapshot write is accepted, the counters refuse writes, and the two
+    # write-only registers answer all ones when read (annex A.3).
+    "CNT_DB_RX reads 0         |readl $((BAR0 + 0x98))|0x0000000000000000"
+    "CNT_CYCLES_E1 reads 0     |readl $((BAR0 + 0xe4))|0x0000000000000000"
+    "CNT_SNAP write            |writel $((BAR0 + 0x94)) 0x00000001|"
+    "CNT_DB_RX after snapshot  |readl $((BAR0 + 0x98))|0x0000000000000000"
+    "write to counter          |writel $((BAR0 + 0xac)) 0xdeadbeef|"
+    "CNT_GEMM survived that    |readl $((BAR0 + 0xac))|0x0000000000000000"
+    "read of CNT_SNAP is WO    |readl $((BAR0 + 0x94))|0x00000000ffffffff"
+    "read of CNT_RESET is WO   |readl $((BAR0 + 0x90))|0x00000000ffffffff"
+    "CNT_RESET write           |writel $((BAR0 + 0x90)) 0x00000001|"
+    "CNT_DB_RX after reset     |readl $((BAR0 + 0x98))|0x0000000000000000"
     "write to read-only MAGIC  |writel $((BAR0 + 0x00)) 0xdeadbeef|"
     "MAGIC survived that write |readl $((BAR0 + 0x00))|0x000000004f4c4556"
     "BAR2 stub reads 0         |readl $BAR2|0x0000000000000000"
