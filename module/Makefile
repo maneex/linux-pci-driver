@@ -20,12 +20,13 @@ all:
 
 clean:
 	$(MAKE) -C $(KDIR) CC=$(CC) M=$(PWD) clean
-	$(RM) other/cat_nonblock *.plist
+	$(RM) *.plist
 
+# The shared header lives in qemu-device/ and follows QEMU's style, not the
+# kernel's, so it is deliberately left out.
 indent:
 	@if [ -z "$(CLANG_FORMAT)" ]; then \
 		echo "No clang-format found. Install clang-format-20 or clang-format." >&2; \
 		exit 1; \
 	fi
-	"$(CLANG_FORMAT)" -i *.[ch]
-	"$(CLANG_FORMAT)" -i other/*.[ch]
+	"$(CLANG_FORMAT)" -i src/*.[ch] include/*.[ch]
