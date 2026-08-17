@@ -27,11 +27,10 @@
 #define VEL_PCI_CLASS       0x1200u  /* processing accelerator, prog-if 0 */
 
 /*
- * Config space capability layout.  MSI-X is not wired yet (step 3 of
- * section 13); its offset is reserved here so the two capabilities cannot
- * collide once msix_init() lands.  PCI Express v2 spans 0x3C bytes.
+ * Config space capability layout.  MSI-X spans 12 bytes, PCI Express v2
+ * spans 0x3C, and the two must not collide.
  */
-#define VEL_PCI_CAP_MSIX    0x40u    /* 0x40 .. 0x4B, reserved            */
+#define VEL_PCI_CAP_MSIX    0x40u    /* 0x40 .. 0x4B                      */
 #define VEL_PCI_CAP_EXPRESS 0x60u    /* 0x60 .. 0x9B                      */
 
 /* ------------------------------------------------------------------ */
@@ -89,6 +88,31 @@
 #define VEL_BAR2_SIZE       (VEL_APERTURE_SIZE + VEL_WINDOW_SIZE)
 #define VEL_BAR4_INDEX      4             /* MEM32, MSI-X tables           */
 #define VEL_BAR4_SIZE       (8u << 10)
+
+/*
+ * Where the MSI-X table and PBA sit inside BAR4.  The spec fixes the BAR
+ * and its size but not this split; table at the base and PBA at half the
+ * BAR follows the QEMU convention and leaves both 4 KiB-aligned.  A driver
+ * never needs these -- the PCI core reads them out of the capability -- but
+ * the qtest layer does, and so would a second implementation.
+ */
+#define VEL_MSIX_TABLE_OFF  0x0000u
+#define VEL_MSIX_PBA_OFF    0x1000u
+
+/*
+ * MSI-X vector assignment, section 3.3.  Only CONFIG and ERROR latch a bit
+ * in IRQ_STATUS and require an IRQ_ACK; the four queue vectors acknowledge
+ * nothing and their handlers touch no register at all.
+ */
+#define VEL_IRQ_VEC_CONFIG  0u
+#define VEL_IRQ_VEC_VRING0  1u            /* device -> host                */
+#define VEL_IRQ_VEC_VRING1  2u            /* host -> device                */
+#define VEL_IRQ_VEC_ENGQ0   3u
+#define VEL_IRQ_VEC_ENGQ1   4u
+#define VEL_IRQ_VEC_ERROR   5u
+
+#define VEL_IRQ_LATCHED     ((1u << VEL_IRQ_VEC_CONFIG) | \
+                             (1u << VEL_IRQ_VEC_ERROR))
 
 /* Offset of the sliding window inside BAR2 (section 3.1) */
 #define VEL_BAR2_WINDOW_OFF VEL_APERTURE_SIZE
@@ -223,6 +247,17 @@
 #define VEL_CAP_TRANSPOSE   (1u << 2)
 
 #define VEL_TOPOLOGY        ((VEL_NODES << 16) | VEL_ENGINES)
+
+/* ERR_INJECT bits, section 9 */
+#define VEL_ERR_INJECT_GEMM_EIO   (1u << 0)
+#define VEL_ERR_INJECT_CORRUPT    (1u << 1)
+#define VEL_ERR_INJECT_FW_CRASH   (1u << 2)
+#define VEL_ERR_INJECT_DELAY      (1u << 3)
+#define VEL_ERR_INJECT_DROP_NOTIF (1u << 4)
+#define VEL_ERR_INJECT_ALLOC_FAIL (1u << 5)
+#define VEL_ERR_INJECT_WIN_IGNORE (1u << 6)
+#define VEL_ERR_INJECT_ENG1_STALL (1u << 7)
+#define VEL_ERR_INJECT_STALE_GEN  (1u << 8)
 
 /* FW_STATUS values, section 4.1 */
 #define VEL_FW_STATUS_RESET     0u

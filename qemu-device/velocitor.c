@@ -6,8 +6,7 @@
  * of the contract described there (spec section 0.6); annex D lists the
  * obligations that do not follow from the section text.
  *
- * SCOPE IMPLEMENTED TODAY -- deliberately narrow, matching a driver that has
- * only a probe (step 2 of spec section 13 and below):
+ * SCOPE IMPLEMENTED TODAY -- steps 2 and 3 of spec section 13:
  *
  *   - PCI identity and capability layout      (spec 2.1, 3)
  *   - the three BARs, with contractual type and size, so lspci and the
@@ -15,13 +14,19 @@
  *   - the BAR0 identity block and SCRATCH     (spec 4.1)
  *   - the counter block, CNT_SNAP and CNT_RESET
  *                                             (spec 4.5)
+ *   - MSI-X on BAR4, six vectors, and IRQ_STATUS / IRQ_MASK / IRQ_ACK
+ *                                             (spec 3.3, 4.1)
+ *   - ERR_INJECT bit 2, the firmware-crash injection, as the one way to
+ *     make a vector go up before there is a firmware
+ *                                             (spec 9)
  *   - the BAR0 access rules: 32-bit aligned only, reserved offsets read 0
  *                                             (spec 4)
  *
  * Everything else in BAR0 answers as reserved and logs under LOG_UNIMP with
- * the spec section that will implement it.  BAR2 and BAR4 are declared but
- * empty.  Nothing here starts a firmware, moves data, or raises an
- * interrupt; there is no state machine to get wrong yet.
+ * the spec section that will implement it.  BAR2 is declared but empty.
+ * Nothing here starts a firmware or moves data; the qualified error block
+ * of section 4.4 is not implemented, so an injected crash raises vector 5
+ * without an ERR_CODE to go with it.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -29,6 +34,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "hw/pci/msix.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pcie.h"
 #include "migration/vmstate.h"
@@ -60,6 +66,15 @@ struct VelocitorState {
      */
     uint32_t cnt[VEL_CNT_COUNT];
     uint32_t cnt_snap[VEL_CNT_COUNT];
+
+    /* Interrupt state, spec sections 3.3 and 4.1 */
+    uint32_t irq_status;    /* 0x028 -- bits 0 and 5 only                 */
+    uint32_t irq_mask;      /* 0x02C -- 1 = masked                        */
+    uint32_t fw_status;     /* 0x020                                      */
+
+    /* Error injection, spec section 9 */
+    uint32_t err_inject;    /* 0x040                                      */
+    uint32_t err_inject_arg;/* 0x044                                      */
 };
 
 /* ------------------------------------------------------------------ */
@@ -118,6 +133,51 @@ static bool velocitor_access_ok(const char *what, hwaddr addr, unsigned size)
 }
 
 /* ------------------------------------------------------------------ */
+/* Interrupts -- spec sections 3.3 and 4.1                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Raise one MSI-X vector.
+ *
+ * CNT_NOTIFY_TX counts the moment the device *decides* to notify, before
+ * anything downstream can swallow the message.  Spec 4.5 is explicit about
+ * this: a suppressed interrupt must still be counted, otherwise the two
+ * sides agree and the loss is invisible -- which would empty the central
+ * demonstration of the project of its content.
+ *
+ * Only vectors 0 and 5 latch a bit in IRQ_STATUS.  The four queue vectors
+ * acknowledge nothing (spec 3.3), so their handlers need no MMIO at all.
+ *
+ * IRQ_MASK suppresses the message but not the latch: the driver can still
+ * see what happened by reading IRQ_STATUS.  Unmasking does not replay a
+ * suppressed message -- the spec settles neither point, so both are
+ * decisions for section 16.
+ */
+static void velocitor_raise(VelocitorState *s, unsigned vector)
+{
+    PCIDevice *pdev = PCI_DEVICE(s);
+
+    s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_NOTIFY_TX)]++;
+
+    if ((1u << vector) & VEL_IRQ_LATCHED) {
+        s->irq_status |= 1u << vector;
+    }
+
+    if (s->irq_mask & (1u << vector)) {
+        return;
+    }
+
+    /*
+     * msix_enabled() is false until the guest has written the capability's
+     * enable bit, which is exactly the case under qtest: the latch above is
+     * still observable, the message simply goes nowhere.
+     */
+    if (msix_enabled(pdev)) {
+        msix_notify(pdev, vector);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* BAR0 -- control registers, spec section 4                           */
 /* ------------------------------------------------------------------ */
 
@@ -159,6 +219,18 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
     case VEL_REG_DMA_BITS:
         return VEL_DMA_BITS;
 
+    case VEL_REG_FW_STATUS:
+        return s->fw_status;
+    case VEL_REG_IRQ_STATUS:
+        return s->irq_status;
+    case VEL_REG_IRQ_MASK:
+        return s->irq_mask;
+    case VEL_REG_ERR_INJECT:
+        return s->err_inject;
+    case VEL_REG_ERR_INJECT_ARG:
+        return s->err_inject_arg;
+
+    case VEL_REG_IRQ_ACK:
     case VEL_REG_CNT_RESET:
     case VEL_REG_CNT_SNAP:
         /*
@@ -221,12 +293,43 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
         }
         return;
 
+    case VEL_REG_IRQ_MASK:
+        s->irq_mask = (uint32_t)val & VEL_IRQ_LATCHED;
+        return;
+
+    case VEL_REG_IRQ_ACK:
+        /* Write the bits to clear (spec 4.1); only 0 and 5 ever latch. */
+        s->irq_status &= ~((uint32_t)val & VEL_IRQ_LATCHED);
+        return;
+
+    case VEL_REG_ERR_INJECT_ARG:
+        s->err_inject_arg = (uint32_t)val;
+        return;
+
+    case VEL_REG_ERR_INJECT:
+        s->err_inject = (uint32_t)val;
+        /*
+         * Bit 2 is the only injection wired today (spec 9): the firmware
+         * crashes and vector 5 goes up.  It is here because step 3 needs
+         * some way to make an interrupt happen, and this is the cheapest
+         * trigger the spec already defines -- it also serves section 12
+         * item 6 later.  The error is raised but not yet *qualified*: the
+         * ERR_CODE block of section 4.4 is still unimplemented.
+         */
+        if (s->err_inject & VEL_ERR_INJECT_FW_CRASH) {
+            s->fw_status = VEL_FW_STATUS_CRASHED;
+            velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        }
+        return;
+
     case VEL_REG_MAGIC:
     case VEL_REG_VERSION:
     case VEL_REG_CAPS:
     case VEL_REG_MEM_SIZE:
     case VEL_REG_TOPOLOGY:
     case VEL_REG_DMA_BITS:
+    case VEL_REG_FW_STATUS:
+    case VEL_REG_IRQ_STATUS:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "velocitor: write 0x%08x to read-only register"
                       " 0x%" HWADDR_PRIx " -- ignored\n",
@@ -314,12 +417,9 @@ static void velocitor_realize(PCIDevice *pdev, Error **errp)
 {
     VelocitorState *s = VELOCITOR(pdev);
 
-    /*
-     * MSI-X only (spec section 3.3): six vectors, no INTx.  QEMU already
-     * leaves the interrupt pin at zero unless a device sets it, so this
-     * write changes nothing today -- it states the intent, and holds when
-     * msix_init() lands at step 3 next to devices that do declare a line.
-     */
+    int ret;
+
+    /* MSI-X only (spec section 3.3): six vectors, no INTx line. */
     pdev->config[PCI_INTERRUPT_PIN] = 0x00;
 
     if (pcie_endpoint_cap_init(pdev, VEL_PCI_CAP_EXPRESS) < 0) {
@@ -331,8 +431,14 @@ static void velocitor_realize(PCIDevice *pdev, Error **errp)
                           "velocitor-bar0", VEL_BAR0_SIZE);
     memory_region_init_io(&s->bar2, OBJECT(s), &velocitor_stub_ops,
                           (void *)"BAR2", "velocitor-bar2", VEL_BAR2_SIZE);
-    memory_region_init_io(&s->bar4, OBJECT(s), &velocitor_stub_ops,
-                          (void *)"BAR4", "velocitor-bar4", VEL_BAR4_SIZE);
+    /*
+     * BAR4 is a plain container, not an I/O region: msix_init() installs
+     * the table and PBA into it as subregions.  It stays VEL_BAR4_SIZE
+     * because the size is contractual (spec 3) -- which is also why
+     * msix_init_exclusive_bar() is not used here, as it hardcodes a 4 KiB
+     * BAR of its own choosing.
+     */
+    memory_region_init(&s->bar4, OBJECT(s), "velocitor-bar4", VEL_BAR4_SIZE);
 
     pci_register_bar(pdev, VEL_BAR0_INDEX,
                      PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar0);
@@ -342,6 +448,31 @@ static void velocitor_realize(PCIDevice *pdev, Error **errp)
                      PCI_BASE_ADDRESS_MEM_PREFETCH, &s->bar2);
     pci_register_bar(pdev, VEL_BAR4_INDEX,
                      PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar4);
+
+    ret = msix_init(pdev, VEL_MSIX_VECTORS,
+                    &s->bar4, VEL_BAR4_INDEX, VEL_MSIX_TABLE_OFF,
+                    &s->bar4, VEL_BAR4_INDEX, VEL_MSIX_PBA_OFF,
+                    VEL_PCI_CAP_MSIX, errp);
+    if (ret < 0) {
+        return;
+    }
+
+    /*
+     * Every vector is claimed up front.  msix_notify() returns silently for
+     * a vector that was never "used", so without this the model would look
+     * like it raised an interrupt and the driver would wait forever -- the
+     * exact failure mode this project exists to make impossible.
+     */
+    for (unsigned v = 0; v < VEL_MSIX_VECTORS; v++) {
+        msix_vector_use(pdev, v);
+    }
+}
+
+static void velocitor_exit(PCIDevice *pdev)
+{
+    VelocitorState *s = VELOCITOR(pdev);
+
+    msix_uninit(pdev, &s->bar4, &s->bar4);
 }
 
 static void velocitor_reset(DeviceState *dev)
@@ -351,17 +482,31 @@ static void velocitor_reset(DeviceState *dev)
     s->scratch = 0;
     memset(s->cnt, 0, sizeof(s->cnt));
     memset(s->cnt_snap, 0, sizeof(s->cnt_snap));
+
+    s->irq_status = 0;
+    s->irq_mask = 0;
+    s->fw_status = VEL_FW_STATUS_RESET;
+    s->err_inject = 0;
+    s->err_inject_arg = 0;
+
+    msix_reset(PCI_DEVICE(s));
 }
 
 static const VMStateDescription vmstate_velocitor = {
     .name = "velocitor",
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, VelocitorState),
         VMSTATE_UINT32(scratch, VelocitorState),
         VMSTATE_UINT32_ARRAY(cnt, VelocitorState, VEL_CNT_COUNT),
         VMSTATE_UINT32_ARRAY(cnt_snap, VelocitorState, VEL_CNT_COUNT),
+        VMSTATE_UINT32(irq_status, VelocitorState),
+        VMSTATE_UINT32(irq_mask, VelocitorState),
+        VMSTATE_UINT32(fw_status, VelocitorState),
+        VMSTATE_UINT32(err_inject, VelocitorState),
+        VMSTATE_UINT32(err_inject_arg, VelocitorState),
+        VMSTATE_MSIX(parent_obj, VelocitorState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -372,6 +517,7 @@ static void velocitor_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
     k->realize = velocitor_realize;
+    k->exit = velocitor_exit;
     k->vendor_id = VEL_PCI_VENDOR_ID;
     k->device_id = VEL_PCI_DEVICE_ID;
     k->revision = VEL_PCI_REVISION;

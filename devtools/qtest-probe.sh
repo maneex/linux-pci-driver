@@ -77,7 +77,43 @@ CHECKS=(
     "MAGIC survived that write |readl $((BAR0 + 0x00))|0x000000004f4c4556"
     "BAR2 stub reads 0         |readl $BAR2|0x0000000000000000"
     "BAR2 window offset reads 0|readl $((BAR2 + 0x1000000))|0x0000000000000000"
-    "BAR4 stub reads 0         |readl $BAR4|0x0000000000000000"
+
+    # MSI-X, spec 3.3.  The capability sits where the shared header reserves
+    # it, 0x40, and its two BIR fields pin the contractual placement: table
+    # at BAR4 offset 0, PBA at BAR4 offset 0x1000.  Both read back as the
+    # offset OR'd with the BAR number, so 0x...4.
+    "select cap 0x40          |outl 0xcf8 $((CFG_BASE + 0x40))|"
+    "MSI-X cap id/next/control|inl 0xcfc|0x56011"
+    "select MSIX_TABLE        |outl 0xcf8 $((CFG_BASE + 0x44))|"
+    "MSI-X table is BAR4 + 0  |inl 0xcfc|0x0004"
+    "select MSIX_PBA          |outl 0xcf8 $((CFG_BASE + 0x48))|"
+    "MSI-X PBA is BAR4 + 4K   |inl 0xcfc|0x1004"
+    "vector 0 starts masked   |readl $((BAR4 + 0x0c))|0x0000000000000001"
+
+    # Interrupts, spec 4.1.  Nothing has fired, so the latch is clear and
+    # FW_STATUS is 0 (reset).
+    "FW_STATUS at reset        |readl $((BAR0 + 0x20))|0x0000000000000000"
+    "IRQ_STATUS at reset       |readl $((BAR0 + 0x28))|0x0000000000000000"
+    "IRQ_MASK at reset         |readl $((BAR0 + 0x2c))|0x0000000000000000"
+    "read of IRQ_ACK is WO     |readl $((BAR0 + 0x30))|0x00000000ffffffff"
+
+    # ERR_INJECT bit 2 (spec 9): the firmware crashes and vector 5 goes up.
+    # This is what makes step 3 falsifiable -- without a trigger, IRQ_ACK
+    # could never be exercised because no bit could ever be set.
+    "inject firmware crash     |writel $((BAR0 + 0x40)) 0x00000004|"
+    "FW_STATUS is CRASHED      |readl $((BAR0 + 0x20))|0x0000000000000003"
+    "IRQ_STATUS latched vec 5  |readl $((BAR0 + 0x28))|0x0000000000000020"
+    "IRQ_ACK clears vec 5      |writel $((BAR0 + 0x30)) 0x00000020|"
+    "IRQ_STATUS back to 0      |readl $((BAR0 + 0x28))|0x0000000000000000"
+    "write to read-only STATUS |writel $((BAR0 + 0x28)) 0xffffffff|"
+    "IRQ_STATUS still 0        |readl $((BAR0 + 0x28))|0x0000000000000000"
+
+    # The raise above is the first event any counter has ever seen, so it
+    # is also the first real test of the snapshot: the live counter is 1,
+    # but a read before CNT_SNAP still answers the stale snapshot.
+    "CNT_NOTIFY_TX before snap |readl $((BAR0 + 0x9c))|0x0000000000000000"
+    "CNT_SNAP write            |writel $((BAR0 + 0x94)) 0x00000001|"
+    "CNT_NOTIFY_TX after snap  |readl $((BAR0 + 0x9c))|0x0000000000000001"
 )
 
 commands=("${SETUP[@]}")
