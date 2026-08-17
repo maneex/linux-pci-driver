@@ -1,6 +1,9 @@
+// Velocitor headers.
+#include <velocitor_hw.h>
+
 // Driver headers.
-#include "debugfs.h"
 #include "counters.h"
+#include "debugfs.h"
 
 static int velocitor_debugfs_counters_show(struct seq_file *s, void *unused) {
   struct pci_dev *dev = s->private;
@@ -44,6 +47,17 @@ static int velocitor_debugfs_counters_reset(void *dev, u64 val) {
 DEFINE_DEBUGFS_ATTRIBUTE(velocitor_debugfs_counters_reset_fops, NULL,
                          velocitor_debugfs_counters_reset, "%llu\n");
 
+static int velocitor_debugfs_inject_error(void *dev, u64 cmd) {
+  if (cmd > 255)
+    return -EINVAL;
+
+  struct Device *device = pci_get_drvdata(dev);
+  writel(cmd, device->bar0 + VEL_REG_ERR_INJECT);
+  return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(velocitor_debugfs_inject_error_fops, NULL,
+                         velocitor_debugfs_inject_error, "%llu\n");
+
 static void velocitor_debugfs_release(void *root) {
   debugfs_remove_recursive(root);
 }
@@ -61,5 +75,7 @@ int velocitor_debugfs_initialize(struct pci_dev *dev, struct dentry *root) {
                       &velocitor_debugfs_counters_fops);
   debugfs_create_file_unsafe("counters_reset", 0200, device->debugfs, dev,
                              &velocitor_debugfs_counters_reset_fops);
+  debugfs_create_file_unsafe("inject_error", 0200, device->debugfs, dev,
+                             &velocitor_debugfs_inject_error_fops);
   return 0;
 }
