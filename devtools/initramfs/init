@@ -14,6 +14,10 @@ mount -t devtmpfs devtmpfs /dev
 mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts
 mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+# tracefs is a filesystem of its own since 4.1; mounting debugfs is not enough
+# to get /sys/kernel/tracing, which is where the velocitor_* tracepoints of
+# spec section 11 appear.
+mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null
 mount -t tmpfs tmpfs /tmp
 
 SHARE_DIR=/mnt/velocitor
