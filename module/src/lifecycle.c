@@ -178,7 +178,7 @@ static struct pci_driver velocitor_pci_driver = {
     .dev_groups = NULL};
 
 static int __init init_(void) {
-  pr_info("velocitor: loading driver");
+  pr_info("velocitor: loading driver\n");
   velocitor_debugfs_root = debugfs_create_dir(KBUILD_MODNAME, NULL);
   return pci_register_driver(&velocitor_pci_driver);
 }
@@ -192,7 +192,7 @@ static void __exit exit_(void) {
   // Release MMIO/IOP resources
   // Disable the device
 
-  pr_info("velocitor: unloading driver");
+  pr_info("velocitor: unloading driver\n");
   pci_unregister_driver(&velocitor_pci_driver);
   debugfs_remove_recursive(velocitor_debugfs_root);
 }
