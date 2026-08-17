@@ -28,6 +28,10 @@ static int velocitor_release(struct pci_dev *dev,
   case INIT_STATE_COMPLETE:
     fallthrough;
 
+  case INIT_STATE_IRQ:
+    pci_free_irq_vectors(dev);
+    fallthrough;
+
   case INIT_STATE_DMA:
     pci_clear_master(dev);
     fallthrough;
@@ -183,7 +187,7 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   // Initialize non-PCI (i.e. LAN/SCSI/etc parts of the chip)
   // Enable DMA/processing engines
 
-  pr_info("velocitor.[%s].pci_probe: innitialisation complete", pci_name(dev));
+  pr_info("velocitor.[%s].pci_probe: initialisation complete", pci_name(dev));
 
   return 0;
 }
