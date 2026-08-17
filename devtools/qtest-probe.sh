@@ -75,8 +75,44 @@ CHECKS=(
     "CNT_DB_RX after reset     |readl $((BAR0 + 0x98))|0x0000000000000000"
     "write to read-only MAGIC  |writel $((BAR0 + 0x00)) 0xdeadbeef|"
     "MAGIC survived that write |readl $((BAR0 + 0x00))|0x000000004f4c4556"
-    "BAR2 stub reads 0         |readl $BAR2|0x0000000000000000"
-    "BAR2 window offset reads 0|readl $((BAR2 + 0x1000000))|0x0000000000000000"
+    # BAR2, spec 3.1.  Device-local memory is filled at reset so that every
+    # 32-bit word holds its own offset; that is the oracle the step 4 sweep
+    # compares against, and the driver cannot forge it.
+    "aperture word 0           |readl $BAR2|0x0000000000000000"
+    "aperture word at 0x1000   |readl $((BAR2 + 0x1000))|0x0000000000001000"
+    "aperture last word        |readl $((BAR2 + 0xfffffc))|0x0000000000fffffc"
+    "window at reset shows 0   |readl $((BAR2 + 0x1000000))|0x0000000000000000"
+
+    # The read-back of spec section 9.  Writing WIN_BASE arms the move; only
+    # reading the register commits it.  These two checks are the whole point
+    # of step 4: a driver that skips the read-back reads the same window over
+    # and over, with no error anywhere.
+    "arm WIN_BASE = 16 MiB     |writel $((BAR0 + 0x24)) 0x01000000|"
+    "window has NOT moved yet  |readl $((BAR2 + 0x1000000))|0x0000000000000000"
+    "read-back commits it      |readl $((BAR0 + 0x24))|0x0000000001000000"
+    "window now shows 16 MiB   |readl $((BAR2 + 0x1000000))|0x0000000001000000"
+    "and one word further in   |readl $((BAR2 + 0x1000004))|0x0000000001000004"
+
+    # Last legal base, then the two rejections of spec 3.1.
+    "arm WIN_BASE = 240 MiB    |writel $((BAR0 + 0x24)) 0x0f000000|"
+    "commit                    |readl $((BAR0 + 0x24))|0x000000000f000000"
+    "window shows 240 MiB      |readl $((BAR2 + 0x1000000))|0x000000000f000000"
+    "unaligned base refused    |writel $((BAR0 + 0x24)) 0x0f000004|"
+    "out of range base refused |writel $((BAR0 + 0x24)) 0x10000000|"
+    "WIN_BASE unchanged        |readl $((BAR0 + 0x24))|0x000000000f000000"
+
+    # ERR_INJECT bit 6 (spec 9): the next WIN_BASE write is swallowed with no
+    # error at all.  Only a driver that compares its read-back notices.
+    "arm the win-ignore bit    |writel $((BAR0 + 0x40)) 0x00000040|"
+    "write that gets swallowed |writel $((BAR0 + 0x24)) 0x00000000|"
+    "read-back still 240 MiB   |readl $((BAR0 + 0x24))|0x000000000f000000"
+    "bit was consumed, retry   |writel $((BAR0 + 0x24)) 0x00000000|"
+    "this one took effect      |readl $((BAR0 + 0x24))|0x0000000000000000"
+
+    # CNT_WIN_MOVE counts commits, not writes: three so far.
+    "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
+    "CNT_WIN_MOVE = 3          |readl $((BAR0 + 0xc8))|0x0000000000000003"
+    "CNT_ERR_RANGE = 2         |readl $((BAR0 + 0xd4))|0x0000000000000002"
 
     # MSI-X, spec 3.3.  The capability sits where the shared header reserves
     # it, 0x40, and its two BIR fields pin the contractual placement: table

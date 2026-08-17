@@ -16,17 +16,18 @@
  *                                             (spec 4.5)
  *   - MSI-X on BAR4, six vectors, and IRQ_STATUS / IRQ_MASK / IRQ_ACK
  *                                             (spec 3.3, 4.1)
- *   - ERR_INJECT bit 2, the firmware-crash injection, as the one way to
- *     make a vector go up before there is a firmware
- *                                             (spec 9)
+ *   - device-local memory behind BAR2: fixed aperture, sliding window, and
+ *     the WIN_BASE read-back                  (spec 3.1, 9)
+ *   - ERR_INJECT bits 2 and 6, the firmware crash and the swallowed
+ *     WIN_BASE write                          (spec 9)
  *   - the BAR0 access rules: 32-bit aligned only, reserved offsets read 0
  *                                             (spec 4)
  *
  * Everything else in BAR0 answers as reserved and logs under LOG_UNIMP with
- * the spec section that will implement it.  BAR2 is declared but empty.
- * Nothing here starts a firmware or moves data; the qualified error block
- * of section 4.4 is not implemented, so an injected crash raises vector 5
- * without an ERR_CODE to go with it.
+ * the spec section that will implement it.  Nothing here starts a firmware
+ * or moves data; the qualified error block of section 4.4 is not
+ * implemented, so an injected crash raises vector 5 without an ERR_CODE to
+ * go with it.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -52,10 +53,33 @@ struct VelocitorState {
     /*< public >*/
 
     MemoryRegion bar0;      /* control registers, spec section 4          */
-    MemoryRegion bar2;      /* fixed aperture + sliding window, spec 3.1  */
+    MemoryRegion bar2;      /* container: aperture + window, spec 3.1     */
     MemoryRegion bar4;      /* MSI-X tables, spec section 3               */
 
     uint32_t scratch;       /* 0x00C -- mapping probe, spec section 4.1   */
+
+    /*
+     * Device-local memory, spec section 2.  BAR2 cannot map it directly --
+     * 256 MiB behind a 32 MiB BAR -- so two aliases look into it: the low one
+     * fixed, the high one movable (spec 3.1).
+     *
+     * Aliases rather than I/O callbacks on purpose.  Callbacks would turn
+     * every four-byte access into a VM exit, and the step 4 criterion is a
+     * sweep of the whole memory: 64 million exits, which is not a test anyone
+     * runs twice.  As aliases both halves run at RAM speed, and the only MMIO
+     * left on the path is WIN_BASE itself.
+     */
+    MemoryRegion mem;
+    MemoryRegion aperture;
+    MemoryRegion window;
+
+    /*
+     * Sliding window, spec 3.1 and 9.  Two values: what the driver wrote, and
+     * what the device acts on.  Reading WIN_BASE is what promotes one to the
+     * other -- the read-back the spec makes mandatory.
+     */
+    uint32_t win_base;      /* effective; what the alias currently shows   */
+    uint32_t win_pending;   /* written, not yet confirmed by a read        */
 
     /*
      * Counters, spec section 4.5.  Two copies on purpose: cnt[] is what the
@@ -178,6 +202,77 @@ static void velocitor_raise(VelocitorState *s, unsigned vector)
 }
 
 /* ------------------------------------------------------------------ */
+/* Sliding window -- spec sections 3.1 and 9                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Promote the pending base to the effective one.  Driven by *reading*
+ * WIN_BASE, never by writing it: spec section 9 makes the read-back
+ * mandatory, so a driver that skips it keeps reading perfectly valid data
+ * from the wrong place -- the failure this artefact exists to teach.
+ *
+ * CNT_WIN_MOVE counts effective moves, not writes.  Counting writes would
+ * make the counter agree with a driver that never reads back, and the point
+ * is precisely that the two must disagree.
+ */
+static void velocitor_window_promote(VelocitorState *s)
+{
+    if (s->win_pending == s->win_base) {
+        return;
+    }
+
+    s->win_base = s->win_pending;
+    memory_region_set_alias_offset(&s->window, s->win_base);
+    s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_WIN_MOVE)]++;
+}
+
+static void velocitor_window_write_base(VelocitorState *s, uint32_t base)
+{
+    /*
+     * ERR_INJECT bit 6, spec section 9: swallow this write and say nothing.
+     * The bit is consumed, matching "la prochaine ecriture" -- a driver that
+     * compares its read-back recovers on the next attempt, one that does not
+     * compare stays wrong for good.
+     */
+    if (s->err_inject & VEL_ERR_INJECT_WIN_IGNORE) {
+        s->err_inject &= ~VEL_ERR_INJECT_WIN_IGNORE;
+        return;
+    }
+
+    if ((base & (VEL_WINDOW_SIZE - 1)) != 0 ||
+        base > VEL_MEM_SIZE - VEL_WINDOW_SIZE) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: WIN_BASE 0x%08x unaligned or out of range"
+                      " (spec 3.1) -- ignored\n", base);
+        s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_ERR_RANGE)]++;
+        return;
+    }
+
+    s->win_pending = base;
+}
+
+/*
+ * Every 32-bit word holds its own offset.  Nothing in the spec says the
+ * device powers up with any particular content; this is a model artefact,
+ * and it is what makes the step 4 sweep falsifiable.  A driver that forgets
+ * the read-back reads the first window sixteen times over, and the offset of
+ * the first mismatch names the window that failed to move.
+ *
+ * The driver cannot produce this oracle itself: writing the pattern through
+ * the same faulty addressing it later reads with would cancel the two errors
+ * and the test would pass.
+ */
+static void velocitor_mem_fill_pattern(VelocitorState *s)
+{
+    uint32_t *mem = memory_region_get_ram_ptr(&s->mem);
+    uint32_t off;
+
+    for (off = 0; off < VEL_MEM_SIZE; off += 4) {
+        mem[off / 4] = cpu_to_le32(off);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* BAR0 -- control registers, spec section 4                           */
 /* ------------------------------------------------------------------ */
 
@@ -218,6 +313,11 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
         return VEL_TOPOLOGY;
     case VEL_REG_DMA_BITS:
         return VEL_DMA_BITS;
+
+    case VEL_REG_WIN_BASE:
+        /* The read is the commit point, spec section 9. */
+        velocitor_window_promote(s);
+        return s->win_base;
 
     case VEL_REG_FW_STATUS:
         return s->fw_status;
@@ -293,6 +393,10 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
         }
         return;
 
+    case VEL_REG_WIN_BASE:
+        velocitor_window_write_base(s, (uint32_t)val);
+        return;
+
     case VEL_REG_IRQ_MASK:
         s->irq_mask = (uint32_t)val & VEL_IRQ_LATCHED;
         return;
@@ -362,54 +466,6 @@ static const MemoryRegionOps velocitor_bar0_ops = {
 };
 
 /* ------------------------------------------------------------------ */
-/* BAR2 and BAR4 -- declared, not populated                            */
-/* ------------------------------------------------------------------ */
-
-/*
- * BAR2 carries the fixed aperture and the sliding window (spec 3.1); BAR4
- * carries the MSI-X tables and will be handed to msix_init() at step 3.
- * Both are registered now because the BAR *numbering* is contractual: BAR2
- * is 64-bit and therefore eats slot 3, which is why MSI-X lives in BAR4
- * (spec section 3).  Declaring them costs six lines and settles the layout
- * the driver will map against.
- */
-static uint64_t velocitor_stub_read(void *opaque, hwaddr addr, unsigned size)
-{
-    const char *name = opaque;
-
-    qemu_log_mask(LOG_UNIMP,
-                  "velocitor: %s read at 0x%" HWADDR_PRIx
-                  " -- region not populated yet, reads 0\n", name, addr);
-    return 0;
-}
-
-static void velocitor_stub_write(void *opaque, hwaddr addr, uint64_t val,
-                                 unsigned size)
-{
-    const char *name = opaque;
-
-    qemu_log_mask(LOG_UNIMP,
-                  "velocitor: %s write 0x%" PRIx64 " at 0x%" HWADDR_PRIx
-                  " -- region not populated yet, ignored\n", name, val, addr);
-}
-
-static const MemoryRegionOps velocitor_stub_ops = {
-    .read = velocitor_stub_read,
-    .write = velocitor_stub_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = {
-        .min_access_size = 1,
-        .max_access_size = 8,
-        .unaligned = true,
-    },
-    .impl = {
-        .min_access_size = 1,
-        .max_access_size = 8,
-        .unaligned = true,
-    },
-};
-
-/* ------------------------------------------------------------------ */
 /* Device life cycle                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -429,8 +485,19 @@ static void velocitor_realize(PCIDevice *pdev, Error **errp)
 
     memory_region_init_io(&s->bar0, OBJECT(s), &velocitor_bar0_ops, s,
                           "velocitor-bar0", VEL_BAR0_SIZE);
-    memory_region_init_io(&s->bar2, OBJECT(s), &velocitor_stub_ops,
-                          (void *)"BAR2", "velocitor-bar2", VEL_BAR2_SIZE);
+    memory_region_init_ram(&s->mem, OBJECT(s), "velocitor-mem",
+                           VEL_MEM_SIZE, errp);
+    if (*errp) {
+        return;
+    }
+
+    memory_region_init(&s->bar2, OBJECT(s), "velocitor-bar2", VEL_BAR2_SIZE);
+    memory_region_init_alias(&s->aperture, OBJECT(s), "velocitor-aperture",
+                             &s->mem, 0, VEL_APERTURE_SIZE);
+    memory_region_init_alias(&s->window, OBJECT(s), "velocitor-window",
+                             &s->mem, 0, VEL_WINDOW_SIZE);
+    memory_region_add_subregion(&s->bar2, 0, &s->aperture);
+    memory_region_add_subregion(&s->bar2, VEL_BAR2_WINDOW_OFF, &s->window);
     /*
      * BAR4 is a plain container, not an I/O region: msix_init() installs
      * the table and PBA into it as subregions.  It stays VEL_BAR4_SIZE
@@ -483,6 +550,11 @@ static void velocitor_reset(DeviceState *dev)
     memset(s->cnt, 0, sizeof(s->cnt));
     memset(s->cnt_snap, 0, sizeof(s->cnt_snap));
 
+    s->win_base = 0;
+    s->win_pending = 0;
+    memory_region_set_alias_offset(&s->window, 0);
+    velocitor_mem_fill_pattern(s);
+
     s->irq_status = 0;
     s->irq_mask = 0;
     s->fw_status = VEL_FW_STATUS_RESET;
@@ -494,13 +566,15 @@ static void velocitor_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_velocitor = {
     .name = "velocitor",
-    .version_id = 3,
-    .minimum_version_id = 3,
+    .version_id = 4,
+    .minimum_version_id = 4,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, VelocitorState),
         VMSTATE_UINT32(scratch, VelocitorState),
         VMSTATE_UINT32_ARRAY(cnt, VelocitorState, VEL_CNT_COUNT),
         VMSTATE_UINT32_ARRAY(cnt_snap, VelocitorState, VEL_CNT_COUNT),
+        VMSTATE_UINT32(win_base, VelocitorState),
+        VMSTATE_UINT32(win_pending, VelocitorState),
         VMSTATE_UINT32(irq_status, VelocitorState),
         VMSTATE_UINT32(irq_mask, VelocitorState),
         VMSTATE_UINT32(fw_status, VelocitorState),
