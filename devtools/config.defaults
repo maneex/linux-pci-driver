@@ -38,6 +38,7 @@ QEMU_BIN="${QEMU_BIN:-$QEMU_BUILD/qemu-system-x86_64}"
 # Project paths.  MODULE_DIR is built, never edited, by these scripts.
 MODULE_DIR="$PROJECT_ROOT/module"
 DEVICE_DIR="$PROJECT_ROOT/qemu-device"
+FIRMWARE_DIR="$PROJECT_ROOT/firmware"
 
 # --- Guest runtime ----------------------------------------------------------
 # q35 is required, not a preference: velocitor is a PCI Express endpoint

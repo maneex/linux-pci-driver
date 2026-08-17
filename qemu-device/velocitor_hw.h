@@ -55,6 +55,7 @@
 #define VEL_ENGINE_ANY      0xFFFFFFFFu
 
 /* virtio transport */
+#define VEL_VIRTIO_ID       0x4000u       /* data vdev, spec 2.3           */
 #define VEL_VRING_NUM       256u          /* descriptors per vring         */
 #define VEL_VRING_ALIGN     4096u
 #define VEL_MSIX_VECTORS    6u
@@ -72,6 +73,28 @@
 #define VEL_FW_MAGIC        0x4F465456u
 #define VEL_FW_ABI          1u
 #define VEL_FW_HDR_DA       0u
+#define VEL_FW_NAME         "velocitor-fw.elf"
+
+/*
+ * Firmware header, spec section 6.6:
+ *
+ *     struct vel_fw_hdr {
+ *         __le32 magic;      VEL_FW_MAGIC
+ *         __le32 abi;        VEL_FW_ABI
+ *         __le32 trace_da;   where the firmware put its trace ring
+ *         __le32 trace_len;  VEL_TRACE_SIZE
+ *     };
+ *
+ * Given as offsets rather than as a struct so that this header goes on
+ * depending on nothing: it has no fixed-width types of its own to declare
+ * the fields with, and the three sides that read it -- the image generator,
+ * the model and the driver -- each already have theirs.
+ */
+#define VEL_FW_HDR_OFF_MAGIC     0x00u
+#define VEL_FW_HDR_OFF_ABI       0x04u
+#define VEL_FW_HDR_OFF_TRACE_DA  0x08u
+#define VEL_FW_HDR_OFF_TRACE_LEN 0x0Cu
+#define VEL_FW_HDR_SIZE          0x10u
 
 /* trace */
 #define VEL_TRACE_SIZE      (64u << 10)

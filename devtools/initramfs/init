@@ -29,6 +29,13 @@ if ! mount -t 9p -o trans=virtio,version=9p2000.L "$SHARE_TAG" "$SHARE_DIR" 2>/d
     echo "Make sure QEMU was launched with -virtfs for $SHARE_TAG."
 fi
 
+# request_firmware() searches /lib/firmware and nowhere else, so the image
+# built on the host by devtools/build-firmware.sh has to appear there.  A
+# symlink into the share rather than a copy: rebuilding the firmware then
+# takes effect on the next boot without regenerating the initramfs.
+mkdir -p /lib/firmware
+ln -sf "$SHARE_DIR/firmware/velocitor-fw.elf" /lib/firmware/velocitor-fw.elf
+
 # Test mode.  boot.sh passes the command base64-encoded via velocitor.cmd64=
 # so it survives kernel command line word splitting.
 TESTCMD=""

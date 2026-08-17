@@ -20,3 +20,6 @@ vm/*.qcow2
 module/velocitor.mod.c
 module/modules.order
 module/Module.symvers
+# Generated firmware image and its generator
+firmware/velocitor-fw.elf
+firmware/mkfw
