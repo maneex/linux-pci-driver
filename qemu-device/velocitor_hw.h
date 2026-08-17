@@ -101,6 +101,22 @@
 #define VEL_TRACE_ENTRY     128u
 #define VEL_TRACE_ENTRIES   511u
 
+/*
+ * Trace ring header, spec section 6.6:
+ *
+ *     struct vel_trace_hdr { __le32 head, tail, dropped, entry_size; };
+ *
+ * Offsets rather than a struct, for the reason given for the firmware
+ * header below.  head belongs to the model and tail to the driver; neither
+ * writes the other's index, which is what keeps two concurrent readers from
+ * stealing each other's entries.
+ */
+#define VEL_TRACE_OFF_HEAD       0x00u
+#define VEL_TRACE_OFF_TAIL       0x04u
+#define VEL_TRACE_OFF_DROPPED    0x08u
+#define VEL_TRACE_OFF_ENTRY_SIZE 0x0Cu
+#define VEL_TRACE_HDR_SIZE       0x10u
+
 /* ------------------------------------------------------------------ */
 /* BAR layout -- spec section 3                                        */
 /* ------------------------------------------------------------------ */

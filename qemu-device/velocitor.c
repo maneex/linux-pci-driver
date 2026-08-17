@@ -23,6 +23,10 @@
  *   - the shadow resource table registers, and the shallow check the model
  *     makes of the table when RSC_VALID goes up
  *                                             (spec 4.2, 6.4)
+ *   - the firmware life cycle: RESET, the firmware header check that makes
+ *     the load falsifiable, FW_STATUS through 1 and 2, FW_ABI, GENERATION
+ *     and an initialised trace ring
+ *                                             (spec 4.1, 6.1, 6.5, 6.6)
  *   - ERR_INJECT bits 2 and 6, the firmware crash and the swallowed
  *     WIN_BASE write                          (spec 9)
  *   - the BAR0 access rules: 32-bit aligned only, reserved offsets read 0
@@ -101,7 +105,24 @@ struct VelocitorState {
     /* Interrupt state, spec sections 3.3 and 4.1 */
     uint32_t irq_status;    /* 0x028 -- bits 0 and 5 only                 */
     uint32_t irq_mask;      /* 0x02C -- 1 = masked                        */
+
+    /*
+     * Firmware life cycle, spec sections 4.1, 6.1 and 6.5.  RESET is the
+     * only one of these the driver writes; the other three are what the
+     * model answers about the boot it just did or refused to do.
+     *
+     * The 1 -> 2 transition runs from a timer for the same reason the DMA
+     * does (annex D.1): a driver that polls FW_STATUS after releasing RESET
+     * has to see "verified" before "running", or the wait in ops->start()
+     * would be a formality that never actually waits for anything.
+     */
+    uint32_t reset;         /* 0x01C -- 1 = asserted                      */
     uint32_t fw_status;     /* 0x020                                      */
+    uint32_t fw_abi;        /* 0x038 -- 0 until the header checks out     */
+    uint32_t generation;    /* 0x03C -- bumped on every entry into 2      */
+    uint32_t trace_da;      /* where the firmware header says the ring is */
+    uint32_t trace_len;
+    QEMUTimer *boot_timer;
 
     /*
      * Bring-up DMA, spec section 4.3.  The copy runs from a virtual-clock
@@ -407,6 +428,156 @@ static void velocitor_dma_start(VelocitorState *s, uint32_t ctl)
 }
 
 /* ------------------------------------------------------------------ */
+/* Firmware life cycle -- spec sections 4.1, 6.1, 6.5 and 6.6          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Simulated boot time, virtual clock.  Long enough next to the DMA latency
+ * that the two states are told apart by a driver that polls, short enough
+ * that nobody waits for it.
+ */
+#define VEL_FW_BOOT_LATENCY_NS 100000
+
+static uint32_t velocitor_mem_read32(VelocitorState *s, uint32_t off)
+{
+    const uint32_t *mem = memory_region_get_ram_ptr(&s->mem);
+
+    return le32_to_cpu(mem[off / 4]);
+}
+
+static void velocitor_mem_write32(VelocitorState *s, uint32_t off, uint32_t val)
+{
+    uint32_t *mem = memory_region_get_ram_ptr(&s->mem);
+
+    mem[off / 4] = cpu_to_le32(val);
+}
+
+/*
+ * The boot completes here, one virtual tick after the header checked out.
+ *
+ * GENERATION moves on every entry into "running" (spec 6.5), and that is the
+ * whole of the ABA defence: the allocator starts over at each boot, so a
+ * handle from the previous generation must not silently name someone else's
+ * allocation.  A driver that composes {generation, handle} pairs sees the
+ * change; one that keeps bare handles across a crash does not, which is the
+ * failure the project exists to make visible.
+ */
+static void velocitor_boot_done(void *opaque)
+{
+    VelocitorState *s = opaque;
+
+    s->fw_status = VEL_FW_STATUS_RUNNING;
+    s->generation++;
+
+    /*
+     * Publish an empty, well-formed trace ring (spec 6.6).  The loader has
+     * already zeroed this region -- it is past the end of the ELF's file
+     * data, so the core memset_io()s it -- which leaves head, tail and
+     * dropped correct; only the entry size has to be stated.  A driver
+     * reading the ring before a single entry exists then finds an empty
+     * ring rather than having to guess whether it is empty or garbage.
+     */
+    velocitor_mem_write32(s, s->trace_da + VEL_TRACE_OFF_ENTRY_SIZE,
+                          VEL_TRACE_ENTRY);
+}
+
+/*
+ * Verify the firmware header, spec section 6.6, and start the boot.
+ *
+ * This is what stops step 6 from being ceremonial.  The model executes C
+ * that does not depend on a single byte of the image, so without a check on
+ * the loaded bytes a completely broken `load` would boot just as well as a
+ * correct one.  Here the magic has to be in device memory, at the device
+ * address the header contract names, for the firmware to run at all.
+ */
+static void velocitor_fw_verify(VelocitorState *s)
+{
+    uint32_t magic = velocitor_mem_read32(s, VEL_FW_HDR_DA +
+                                          VEL_FW_HDR_OFF_MAGIC);
+    uint32_t abi = velocitor_mem_read32(s, VEL_FW_HDR_DA +
+                                        VEL_FW_HDR_OFF_ABI);
+    uint32_t trace_da = velocitor_mem_read32(s, VEL_FW_HDR_DA +
+                                             VEL_FW_HDR_OFF_TRACE_DA);
+    uint32_t trace_len = velocitor_mem_read32(s, VEL_FW_HDR_DA +
+                                              VEL_FW_HDR_OFF_TRACE_LEN);
+
+    /*
+     * Releasing RESET starts from nothing, whatever the previous boot ended
+     * as.  Spec 4.1 says a header that does not check out leaves FW_STATUS
+     * at 0, and that has to hold coming out of a crash as much as coming out
+     * of a cold start.
+     */
+    s->fw_status = VEL_FW_STATUS_RESET;
+    s->fw_abi = 0;
+
+    if (magic != VEL_FW_MAGIC || abi != VEL_FW_ABI) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: firmware header at device address 0x%x has "
+                      "magic 0x%08x, ABI %u -- expected 0x%08x and %u "
+                      "(spec 6.6); staying in reset\n",
+                      VEL_FW_HDR_DA, magic, abi, VEL_FW_MAGIC, VEL_FW_ABI);
+        velocitor_error_set(s, VEL_ERR_FW_HEADER, magic);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return;
+    }
+
+    /*
+     * The ring is read by the driver through the fixed aperture (spec 6.2),
+     * so a firmware that puts it anywhere else has announced a buffer the
+     * host cannot reach.
+     */
+    if (trace_len != VEL_TRACE_SIZE ||
+        (uint64_t)trace_da + trace_len > VEL_APERTURE_SIZE) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: firmware trace buffer at 0x%08x + %u is not "
+                      "%u bytes inside the fixed aperture (spec 6.6); "
+                      "staying in reset\n",
+                      trace_da, trace_len, VEL_TRACE_SIZE);
+        velocitor_error_set(s, VEL_ERR_FW_HEADER, trace_da);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return;
+    }
+
+    s->fw_abi = abi;
+    s->trace_da = trace_da;
+    s->trace_len = trace_len;
+    s->fw_status = VEL_FW_STATUS_VERIFIED;
+
+    timer_mod(s->boot_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VEL_FW_BOOT_LATENCY_NS);
+}
+
+static void velocitor_reset_write(VelocitorState *s, uint32_t val)
+{
+    s->reset = val & 1;
+
+    if (s->reset) {
+        /* Annex D.3: deferred work goes before anything else. */
+        timer_del(s->boot_timer);
+        s->fw_status = VEL_FW_STATUS_RESET;
+        s->fw_abi = 0;
+        s->trace_da = 0;
+        s->trace_len = 0;
+        return;
+    }
+
+    /*
+     * Spec section 6.1 has ops->start() publish RSC_ADDR_* and only then
+     * release RESET.  The other order is not refused -- nothing in the boot
+     * itself needs the table yet -- but it is a driver bug waiting for step
+     * 7, where the device reads the notifyids out of it.
+     */
+    if (!s->rsc_valid) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: RESET released with no valid shadow "
+                      "resource table (spec 6.1) -- the notifyids will not be "
+                      "readable\n");
+    }
+
+    velocitor_fw_verify(s);
+}
+
+/* ------------------------------------------------------------------ */
 /* Shadow resource table -- spec sections 4.2 and 6.4                  */
 /* ------------------------------------------------------------------ */
 
@@ -586,8 +757,16 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
     case VEL_REG_ERR_INFO_HI:
         return s->err_info_hi;
 
+    case VEL_REG_RESET:
+        return s->reset;
     case VEL_REG_FW_STATUS:
         return s->fw_status;
+    case VEL_REG_FW_ABI:
+        /* Zero until the header has been checked (spec 4.1): the driver
+         * cannot mistake "not verified yet" for "ABI 1". */
+        return s->fw_abi;
+    case VEL_REG_GENERATION:
+        return s->generation;
     case VEL_REG_IRQ_STATUS:
         return s->irq_status;
     case VEL_REG_IRQ_MASK:
@@ -661,6 +840,10 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
         }
         return;
 
+    case VEL_REG_RESET:
+        velocitor_reset_write(s, (uint32_t)val);
+        return;
+
     case VEL_REG_WIN_BASE:
         velocitor_window_write_base(s, (uint32_t)val);
         return;
@@ -720,6 +903,9 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
          * ERR_CODE block of section 4.4 is still unimplemented.
          */
         if (s->err_inject & VEL_ERR_INJECT_FW_CRASH) {
+            /* Annex D.3 again: a crash cancels what was in flight, including
+             * a boot that had not finished. */
+            timer_del(s->boot_timer);
             s->fw_status = VEL_FW_STATUS_CRASHED;
             velocitor_raise(s, VEL_IRQ_VEC_ERROR);
         }
@@ -732,6 +918,8 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
     case VEL_REG_TOPOLOGY:
     case VEL_REG_DMA_BITS:
     case VEL_REG_FW_STATUS:
+    case VEL_REG_FW_ABI:
+    case VEL_REG_GENERATION:
     case VEL_REG_IRQ_STATUS:
     case VEL_REG_DBG_DMA_STATUS:
     case VEL_REG_ERR_CODE:
@@ -838,6 +1026,7 @@ static void velocitor_realize(PCIDevice *pdev, Error **errp)
     }
 
     s->dma_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, velocitor_dma_run, s);
+    s->boot_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, velocitor_boot_done, s);
 }
 
 static void velocitor_exit(PCIDevice *pdev)
@@ -845,6 +1034,7 @@ static void velocitor_exit(PCIDevice *pdev)
     VelocitorState *s = VELOCITOR(pdev);
 
     timer_free(s->dma_timer);
+    timer_free(s->boot_timer);
     msix_uninit(pdev, &s->bar4, &s->bar4);
 }
 
@@ -859,6 +1049,9 @@ static void velocitor_reset(DeviceState *dev)
     /* Annex D.3: cancel deferred work before anything else. */
     if (s->dma_timer) {
         timer_del(s->dma_timer);
+    }
+    if (s->boot_timer) {
+        timer_del(s->boot_timer);
     }
     s->dma_addr_lo = 0;
     s->dma_addr_hi = 0;
@@ -883,7 +1076,20 @@ static void velocitor_reset(DeviceState *dev)
 
     s->irq_status = 0;
     s->irq_mask = 0;
+
+    /*
+     * RESET reads back asserted: nothing has been loaded, so saying anything
+     * else would be a lie the driver could act on.  GENERATION starts at
+     * zero and the first successful boot makes it 1, so "no firmware has
+     * ever run here" and "one has" are distinguishable (spec 6.5).
+     */
+    s->reset = 1;
     s->fw_status = VEL_FW_STATUS_RESET;
+    s->fw_abi = 0;
+    s->generation = 0;
+    s->trace_da = 0;
+    s->trace_len = 0;
+
     s->err_inject = 0;
     s->err_inject_arg = 0;
 
@@ -892,8 +1098,8 @@ static void velocitor_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_velocitor = {
     .name = "velocitor",
-    .version_id = 6,
-    .minimum_version_id = 6,
+    .version_id = 7,
+    .minimum_version_id = 7,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, VelocitorState),
         VMSTATE_UINT32(scratch, VelocitorState),
@@ -916,7 +1122,12 @@ static const VMStateDescription vmstate_velocitor = {
         VMSTATE_UINT32(err_info_hi, VelocitorState),
         VMSTATE_UINT32(irq_status, VelocitorState),
         VMSTATE_UINT32(irq_mask, VelocitorState),
+        VMSTATE_UINT32(reset, VelocitorState),
         VMSTATE_UINT32(fw_status, VelocitorState),
+        VMSTATE_UINT32(fw_abi, VelocitorState),
+        VMSTATE_UINT32(generation, VelocitorState),
+        VMSTATE_UINT32(trace_da, VelocitorState),
+        VMSTATE_UINT32(trace_len, VelocitorState),
         VMSTATE_UINT32(err_inject, VelocitorState),
         VMSTATE_UINT32(err_inject_arg, VelocitorState),
         VMSTATE_MSIX(parent_obj, VelocitorState),

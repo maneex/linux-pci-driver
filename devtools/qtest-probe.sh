@@ -131,7 +131,10 @@ CHECKS=(
 
     # Interrupts, spec 4.1.  Nothing has fired, so the latch is clear and
     # FW_STATUS is 0 (reset).
+    "RESET at reset is asserted|readl $((BAR0 + 0x1c))|0x0000000000000001"
     "FW_STATUS at reset        |readl $((BAR0 + 0x20))|0x0000000000000000"
+    "FW_ABI is 0 until checked |readl $((BAR0 + 0x38))|0x0000000000000000"
+    "GENERATION at reset       |readl $((BAR0 + 0x3c))|0x0000000000000000"
     "IRQ_STATUS at reset       |readl $((BAR0 + 0x28))|0x0000000000000000"
     "IRQ_MASK at reset         |readl $((BAR0 + 0x2c))|0x0000000000000000"
     "read of IRQ_ACK is WO     |readl $((BAR0 + 0x30))|0x00000000ffffffff"
@@ -239,6 +242,64 @@ CHECKS=(
     "publish it                |writel $((BAR0 + 0xfc)) 0x00000001|"
     "device refused it         |readl $((BAR0 + 0xfc))|0x0000000000000000"
     "ERR_CODE = 4 (DMA width)  |readl $((BAR0 + 0x50))|0x0000000000000004"
+
+    # Firmware life cycle, spec 4.1, 6.1, 6.5 and 6.6.  Put the table back
+    # where the device can read it first, so that releasing RESET is the
+    # sequence section 6.1 prescribes and not a second thing under test.
+    "clear the injection bits  |writel $((BAR0 + 0x40)) 0x00000000|"
+    "RSC_ADDR_HI back in range |writel $((BAR0 + 0xf4)) 0x00000000|"
+    "publish the table         |writel $((BAR0 + 0xfc)) 0x00000001|"
+    "table is valid again      |readl $((BAR0 + 0xfc))|0x0000000000000001"
+
+    # Nothing has been loaded, so device memory still holds the reset
+    # pattern and word 0 is not the magic.  This is the check that makes the
+    # load falsifiable: a broken `load` cannot boot.
+    "release RESET, no firmware|writel $((BAR0 + 0x1c)) 0x00000000|"
+    "RESET reads back released |readl $((BAR0 + 0x1c))|0x0000000000000000"
+    "FW_STATUS stayed at reset |readl $((BAR0 + 0x20))|0x0000000000000000"
+    "ERR_CODE = 10 (fw header) |readl $((BAR0 + 0x50))|0x000000000000000a"
+    "vector 5 was raised       |readl $((BAR0 + 0x28))|0x0000000000000020"
+    "ack it                    |writel $((BAR0 + 0x30)) 0x00000020|"
+
+    # Now write a header the model will accept, through the fixed aperture --
+    # which is how ops->load() reaches device memory too (spec 6.2).
+    "header magic              |writel $BAR2 0x4f465456|"
+    "header ABI = 1            |writel $((BAR2 + 0x04)) 0x00000001|"
+    "header trace_da = 64 KiB  |writel $((BAR2 + 0x08)) 0x00010000|"
+    "header trace_len = 64 KiB |writel $((BAR2 + 0x0c)) 0x00010000|"
+    "assert RESET              |writel $((BAR0 + 0x1c)) 0x00000001|"
+    "RESET reads back asserted |readl $((BAR0 + 0x1c))|0x0000000000000001"
+    "release it                |writel $((BAR0 + 0x1c)) 0x00000000|"
+    "FW_STATUS = verified      |readl $((BAR0 + 0x20))|0x0000000000000001"
+    "FW_ABI now reads 1        |readl $((BAR0 + 0x38))|0x0000000000000001"
+    "GENERATION not yet bumped |readl $((BAR0 + 0x3c))|0x0000000000000000"
+    "let virtual time pass    |clock_step 200000|"
+    "FW_STATUS = running       |readl $((BAR0 + 0x20))|0x0000000000000002"
+    "GENERATION = 1            |readl $((BAR0 + 0x3c))|0x0000000000000001"
+    # Only the entry size is the model's to write.  head, tail and dropped
+    # are zeroed by the loader, which memset_io()s everything past the end of
+    # the ELF's file data -- and there is no loader here, so device memory
+    # still holds the reset pattern at those three words.
+    "trace ring entry size     |readl $((BAR2 + 0x1000c))|0x0000000000000080"
+
+    # A second boot: the generation moves, which is what keeps a handle from
+    # the previous one from naming someone else's allocation (spec 6.5).
+    "assert RESET              |writel $((BAR0 + 0x1c)) 0x00000001|"
+    "FW_STATUS back to reset   |readl $((BAR0 + 0x20))|0x0000000000000000"
+    "FW_ABI back to 0          |readl $((BAR0 + 0x38))|0x0000000000000000"
+    "release it                |writel $((BAR0 + 0x1c)) 0x00000000|"
+    "let virtual time pass    |clock_step 200000|"
+    "FW_STATUS = running       |readl $((BAR0 + 0x20))|0x0000000000000002"
+    "GENERATION = 2            |readl $((BAR0 + 0x3c))|0x0000000000000002"
+
+    # A trace ring the host could not reach through the fixed aperture is a
+    # header that has to be refused (spec 6.6).
+    "assert RESET              |writel $((BAR0 + 0x1c)) 0x00000001|"
+    "trace_da past the aperture|writel $((BAR2 + 0x08)) 0x00ff8000|"
+    "release it                |writel $((BAR0 + 0x1c)) 0x00000000|"
+    "FW_STATUS stayed at reset |readl $((BAR0 + 0x20))|0x0000000000000000"
+    "ERR_CODE = 10 (fw header) |readl $((BAR0 + 0x50))|0x000000000000000a"
+    "GENERATION did not move   |readl $((BAR0 + 0x3c))|0x0000000000000002"
 )
 
 commands=("${SETUP[@]}")
