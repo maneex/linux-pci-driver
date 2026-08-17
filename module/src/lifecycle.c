@@ -77,43 +77,6 @@ static int initialize_dma_engine(struct pci_dev *dev, struct Device *device) {
   return 0;
 }
 
-static void velocitor_irq_release(void *data) { pci_free_irq_vectors(data); }
-
-// https://docs.kernel.org/PCI/msi-howto.html
-// https://kernel-internals.org/interrupts/threaded-irq/
-static int initialize_irq_handlers(struct pci_dev *dev, struct Device *device) {
-  int err = 0;
-  if ((err = pci_alloc_irq_vectors(dev, VEL_MSIX_VECTORS, VEL_MSIX_VECTORS,
-                                   PCI_IRQ_MSIX)) < 0)
-    return err;
-
-  if ((err = devm_add_action_or_reset(&dev->dev, velocitor_irq_release, dev)))
-    return err;
-
-  // FIXME! IRQ handler affinity ?
-  // FIXME! Threaded IRQ ?
-  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 0),
-                              irq_config_event, 0, "velocitor-cfg", dev)))
-    return err;
-  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 1),
-                              irq_queue0_event, 0, "velocitor-q0", dev)))
-    return err;
-  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 2),
-                              irq_queue1_event, 0, "velocitor-q1", dev)))
-    return err;
-  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 3),
-                              irq_queue2_event, 0, "velocitor-q2", dev)))
-    return err;
-  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 4),
-                              irq_queue3_event, 0, "velocitor-q3", dev)))
-    return err;
-
-  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 5),
-                              irq_error_event, 0, "velocitor-err", dev)))
-    return err;
-  return 0;
-}
-
 static int velocitor_pci_probe(struct pci_dev *dev,
                                const struct pci_device_id *device_id) {
   int err = 0;
@@ -148,7 +111,7 @@ static int velocitor_pci_probe(struct pci_dev *dev,
 
   // Access device configuration space (if needed)
   // Register IRQ handler (request_irq())
-  if ((err = initialize_irq_handlers(dev, device)))
+  if ((err = velocitor_irq_initialize(dev)))
     return err;
 
   // Initialize non-PCI (i.e. LAN/SCSI/etc parts of the chip)
