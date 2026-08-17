@@ -1,8 +1,9 @@
 obj-m += velocitor.o
 velocitor-y := src/lifecycle.o
 velocitor-y += src/irq.o
+velocitor-y += src/counters.o
 
-ccflags-y += -I$(src)/include
+ccflags-y += -I$(src)/include -I$(src)/../qemu-device/
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(CURDIR)

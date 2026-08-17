@@ -113,6 +113,10 @@ static int velocitor_pci_probe(struct pci_dev *dev,
       devm_kzalloc(&(dev->dev), sizeof(struct Device), GFP_KERNEL);
   if (NULL == device)
     return -ENOMEM;
+
+  if ((err = devm_mutex_init(&dev->dev, &device->lock_counters)))
+    return err;
+
   pci_set_drvdata(dev, device);
   dev_info(&dev->dev, "probe: device found");
 
