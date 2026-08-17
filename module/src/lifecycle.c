@@ -86,7 +86,7 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
 
   u32 version = readl(device->bar0 + VEL_REG_VERSION);
   dev_info(&dev->dev, "bar0: device version %d.%d", version >> 16,
-           version & 0xff);
+           version & 0xffff);
 
   return 0;
 }
