@@ -12,6 +12,9 @@ struct Device {
   struct dentry *debugfs;
 
   struct mutex lock_counters;
+
+  size_t last_known_winbase;
+  struct mutex lock_winbase;
 };
 
 #endif // not VELOCITOR_DEVICE_H

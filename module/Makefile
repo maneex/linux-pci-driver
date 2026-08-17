@@ -3,6 +3,7 @@ velocitor-y := src/lifecycle.o
 velocitor-y += src/irq.o
 velocitor-y += src/debugfs.o
 velocitor-y += src/counters.o
+velocitor-y += src/window.o
 
 ccflags-y += -I$(src)/include -I$(src)/../qemu-device/ -I$(src)/src
 

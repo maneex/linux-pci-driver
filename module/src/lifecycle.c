@@ -53,6 +53,7 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
     }
   }
 
+  // Read version.
   u32 version = readl(device->bar0 + VEL_REG_VERSION);
   dev_info(&dev->dev, "bar0: device version %d.%d", version >> 16,
            version & 0xffff);
@@ -86,6 +87,9 @@ static int velocitor_pci_probe(struct pci_dev *dev,
     return -ENOMEM;
 
   if ((err = devm_mutex_init(&dev->dev, &device->lock_counters)))
+    return err;
+
+  if ((err = devm_mutex_init(&dev->dev, &device->lock_winbase)))
     return err;
 
   pci_set_drvdata(dev, device);
