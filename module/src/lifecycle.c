@@ -11,6 +11,7 @@
 // Driver headers.
 #include "debugfs.h"
 #include "device.h"
+#include "dma.h"
 #include "irq.h"
 
 static const struct pci_device_id pci_id_table[] = {
@@ -69,15 +70,6 @@ static int initialize_bar2(struct pci_dev *dev, struct Device *device) {
   return 0;
 }
 
-static int initialize_dma_engine(struct pci_dev *dev, struct Device *device) {
-  int err = 0;
-  pci_set_master(dev);
-  if ((err = dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(VEL_DMA_BITS))))
-    return err;
-  dev_info(&dev->dev, "dma: width %d bits", VEL_DMA_BITS);
-  return 0;
-}
-
 static int velocitor_pci_probe(struct pci_dev *dev,
                                const struct pci_device_id *device_id) {
   int err = 0;
@@ -90,6 +82,9 @@ static int velocitor_pci_probe(struct pci_dev *dev,
     return err;
 
   if ((err = devm_mutex_init(&dev->dev, &device->lock_winbase)))
+    return err;
+
+  if ((err = devm_mutex_init(&dev->dev, &device->lock_dmadbg)))
     return err;
 
   pci_set_drvdata(dev, device);
@@ -110,7 +105,7 @@ static int velocitor_pci_probe(struct pci_dev *dev,
 
   // Set the DMA mask size (for both coherent and streaming DMA)
   // Allocate and initialize shared control data (pci_allocate_coherent())
-  if ((err = initialize_dma_engine(dev, device)))
+  if ((err = velocitor_dma_initialize(dev)))
     return err;
 
   // Access device configuration space (if needed)

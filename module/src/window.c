@@ -24,7 +24,7 @@ int velocitor_window_read(struct pci_dev *dev, void *dst, size_t offset,
   struct Device *device = pci_get_drvdata(dev);
 
   size_t end = 0;
-  if ((!check_add_overflow(offset, size, &end)) || (end > VEL_MEM_SIZE))
+  if ((check_add_overflow(offset, size, &end)) || (end > VEL_MEM_SIZE))
     return -EINVAL;
 
   size_t window = ALIGN_DOWN(offset, VEL_WINDOW_SIZE);

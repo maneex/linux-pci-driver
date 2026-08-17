@@ -3,6 +3,7 @@
 
 #include <linux/dcache.h>
 #include <linux/debugfs.h>
+#include <linux/dma-mapping.h>
 #include <linux/mutex.h>
 
 struct Device {
@@ -12,6 +13,11 @@ struct Device {
   struct dentry *debugfs;
 
   struct mutex lock_counters;
+
+  struct mutex lock_dmadbg;
+
+  void *dma_cpu_addr;
+  dma_addr_t dma_handle;
 
   size_t last_known_winbase;
   struct mutex lock_winbase;

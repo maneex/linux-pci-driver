@@ -25,6 +25,22 @@ TRACE_EVENT(velocitor_winmove, TP_PROTO(u32 from, u32 to, void *caller),
             TP_printk("from=%x to=%x caller=%pS", __entry->from, __entry->to,
                       __entry->caller));
 
+TRACE_EVENT(
+    velocitor_dma_dbg,
+    TP_PROTO(u32 dir, u32 off, u32 poff, u32 len, int res, u32 status, u32 err),
+    TP_ARGS(dir, off, poff, len, res, status, err),
+    TP_STRUCT__entry(__field(u32, dir) __field(u32, off) __field(u32, poff)
+                         __field(u32, len) __field(int, res)
+                             __field(u32, status) __field(u32, err)),
+    TP_fast_assign(__entry->dir = dir; __entry->off = off; __entry->poff = poff;
+                   __entry->len = len; __entry->res = res;
+                   __entry->status = status; __entry->err = err;),
+    TP_printk("dir=%s off=%#x poff=%#x len=%u res=%d status=%u err=%u",
+              __print_symbolic(__entry->dir, {VEL_DBG_DMA_H2D, "H2D"},
+                               {VEL_DBG_DMA_D2H, "D2H"}),
+              __entry->off, __entry->poff, __entry->len, __entry->res,
+              __entry->status, __entry->err));
+
 #endif // not VELOCITOR_TRACE_H
 
 #undef TRACE_INCLUDE_PATH

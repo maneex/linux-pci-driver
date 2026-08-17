@@ -4,6 +4,7 @@ velocitor-y += src/irq.o
 velocitor-y += src/debugfs.o
 velocitor-y += src/counters.o
 velocitor-y += src/window.o
+velocitor-y += src/dma.o
 
 ccflags-y += -I$(src)/include -I$(src)/../qemu-device/ -I$(src)/src
 

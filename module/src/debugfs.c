@@ -1,9 +1,17 @@
+// Linux headers.
+#include <linux/uaccess.h>
+
 // Velocitor headers.
 #include <velocitor_hw.h>
 
 // Driver headers.
 #include "counters.h"
 #include "debugfs.h"
+#include "dma.h"
+
+/**
+ * DebugFS / Counters.
+ */
 
 static int velocitor_debugfs_counters_show(struct seq_file *s, void *unused) {
   struct pci_dev *dev = s->private;
@@ -47,6 +55,9 @@ static int velocitor_debugfs_counters_reset(void *dev, u64 val) {
 DEFINE_DEBUGFS_ATTRIBUTE(velocitor_debugfs_counters_reset_fops, NULL,
                          velocitor_debugfs_counters_reset, "%llu\n");
 
+/**
+ * DebugFS / Inject error
+ */
 static int velocitor_debugfs_inject_error(void *dev, u64 cmd) {
   if (cmd > 255)
     return -EINVAL;
@@ -62,6 +73,81 @@ static void velocitor_debugfs_release(void *root) {
   debugfs_remove_recursive(root);
 }
 
+/**
+ * DebugFS / DMA
+ */
+
+static ssize_t velocitor_debugfs_dma_pool_read(struct file *file,
+                                               char __user *buf, size_t len,
+                                               loff_t *ppos) {
+  struct pci_dev *dev = file->private_data;
+  struct Device *device = pci_get_drvdata(dev);
+
+  return simple_read_from_buffer(buf, len, ppos, device->dma_cpu_addr,
+                                 VEL_HOST_POOL_SIZE);
+}
+
+static ssize_t velocitor_debugfs_dma_pool_write(struct file *file,
+                                                const char __user *buf,
+                                                size_t len, loff_t *ppos) {
+  struct pci_dev *dev = file->private_data;
+  struct Device *device = pci_get_drvdata(dev);
+
+  return simple_write_to_buffer(device->dma_cpu_addr, VEL_HOST_POOL_SIZE, ppos,
+                                buf, len);
+}
+
+static const struct file_operations velocitor_debugfs_dma_pool_fops = {
+    .owner = THIS_MODULE,
+    .open = simple_open,
+    .read = velocitor_debugfs_dma_pool_read,
+    .write = velocitor_debugfs_dma_pool_write,
+    .llseek = default_llseek,
+};
+
+static ssize_t velocitor_debugfs_dma_ctrl_write(struct file *file,
+                                                const char __user *buf,
+                                                size_t len, loff_t *ppos) {
+  struct pci_dev *dev = file->private_data;
+  char line[64] = {};
+  char dir[4] = {};
+  u32 offset = 0;
+  u32 pool_offset = 0;
+  u32 length = 0;
+  u32 err_code = VEL_ERR_NONE;
+  int res = 0;
+
+  if (0 == len || len >= sizeof(line))
+    return -EINVAL;
+  if (copy_from_user(line, buf, len))
+    return -EFAULT;
+
+  // %i takes the base from the prefix, so 0x1000 and 4096 both work.
+  if (4 != sscanf(line, "%3s %i %i %i", dir, &offset, &pool_offset, &length))
+    return -EINVAL;
+
+  if (0 == strcmp(dir, "h2d"))
+    res = velocitor_dma_dbg_write(dev, offset, pool_offset, length, &err_code);
+  else if (0 == strcmp(dir, "d2h"))
+    res = velocitor_dma_dbg_read(dev, offset, pool_offset, length, &err_code);
+  else
+    return -EINVAL;
+
+  // A short write would make the caller retry the rest of its line.
+  return res ? res : len;
+}
+
+static const struct file_operations velocitor_debugfs_dma_ctrl_fops = {
+    .owner = THIS_MODULE,
+    .open = simple_open,
+    .write = velocitor_debugfs_dma_ctrl_write,
+    .llseek = noop_llseek,
+};
+
+/**
+ * DebugFS / Initialize.
+ */
+
 int velocitor_debugfs_initialize(struct pci_dev *dev, struct dentry *root) {
   int err = 0;
   struct Device *device = pci_get_drvdata(dev);
@@ -73,9 +159,19 @@ int velocitor_debugfs_initialize(struct pci_dev *dev, struct dentry *root) {
 
   debugfs_create_file("counters", 0444, device->debugfs, dev,
                       &velocitor_debugfs_counters_fops);
+
   debugfs_create_file_unsafe("counters_reset", 0200, device->debugfs, dev,
                              &velocitor_debugfs_counters_reset_fops);
+
   debugfs_create_file_unsafe("inject_error", 0200, device->debugfs, dev,
                              &velocitor_debugfs_inject_error_fops);
+
+  debugfs_create_file_size("dma_pool", 0600, device->debugfs, dev,
+                           &velocitor_debugfs_dma_pool_fops,
+                           VEL_HOST_POOL_SIZE);
+
+  debugfs_create_file("dma_ctrl", 0200, device->debugfs, dev,
+                      &velocitor_debugfs_dma_ctrl_fops);
+
   return 0;
 }
