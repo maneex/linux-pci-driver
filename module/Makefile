@@ -4,7 +4,7 @@ velocitor-y += src/irq.o
 velocitor-y += src/debugfs.o
 velocitor-y += src/counters.o
 
-ccflags-y += -I$(src)/include -I$(src)/../qemu-device/
+ccflags-y += -I$(src)/include -I$(src)/../qemu-device/ -I$(src)/src
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(CURDIR)
