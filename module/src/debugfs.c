@@ -8,6 +8,7 @@
 #include "counters.h"
 #include "debugfs.h"
 #include "dma.h"
+#include "window.h"
 
 /**
  * DebugFS / Counters.
@@ -145,6 +146,45 @@ static const struct file_operations velocitor_debugfs_dma_ctrl_fops = {
 };
 
 /**
+ * DebugFS / Window
+ */
+static ssize_t velocitor_debugfs_mem_read(struct file *file, char __user *buf,
+                                          size_t len, loff_t *offset) {
+  struct pci_dev *dev = file->private_data;
+  int res = 0;
+  if (*offset >= VEL_MEM_SIZE)
+    return 0;
+
+  void *page = kmalloc(PAGE_SIZE, GFP_KERNEL);
+  if (NULL == page) {
+    res = -ENOMEM;
+    goto out;
+  }
+
+  len = min_t(size_t, len, VEL_MEM_SIZE - *offset);
+  len = min_t(size_t, len, PAGE_SIZE);
+
+  res = velocitor_window_read(dev, page, *offset, len);
+  if (0 == res) {
+    if (!copy_to_user(buf, page, len))
+      *offset += len;
+    else
+      res = -EFAULT;
+  }
+
+out:
+  kfree(page);
+  return res < 0 ? res : len;
+}
+
+static const struct file_operations velocitor_debugfs_mem_fops = {
+    .owner = THIS_MODULE,
+    .open = simple_open,
+    .read = velocitor_debugfs_mem_read,
+    .llseek = default_llseek,
+};
+
+/**
  * DebugFS / Initialize.
  */
 
@@ -172,6 +212,9 @@ int velocitor_debugfs_initialize(struct pci_dev *dev, struct dentry *root) {
 
   debugfs_create_file("dma_ctrl", 0200, device->debugfs, dev,
                       &velocitor_debugfs_dma_ctrl_fops);
+
+  debugfs_create_file_size("mem", 0400, device->debugfs, dev,
+                           &velocitor_debugfs_mem_fops, VEL_MEM_SIZE);
 
   return 0;
 }

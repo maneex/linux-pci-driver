@@ -22,7 +22,7 @@ static int velocitor_window_seek(struct Device *device, u32 offset) {
 int velocitor_window_read(struct pci_dev *dev, void *dst, size_t offset,
                           size_t size) {
   struct Device *device = pci_get_drvdata(dev);
-
+  int err = 0;
   size_t end = 0;
   if ((check_add_overflow(offset, size, &end)) || (end > VEL_MEM_SIZE))
     return -EINVAL;
@@ -31,8 +31,10 @@ int velocitor_window_read(struct pci_dev *dev, void *dst, size_t offset,
 
   mutex_lock(&device->lock_winbase);
 
-  if (!velocitor_window_seek(device, window))
-    return -EIO;
+  if (!velocitor_window_seek(device, window)) {
+    err = -EIO;
+    goto out;
+  }
 
   size_t done = min(size, VEL_WINDOW_SIZE + window - offset);
   memcpy_fromio(dst, device->bar2 + VEL_BAR2_WINDOW_OFF + offset - window,
@@ -40,15 +42,17 @@ int velocitor_window_read(struct pci_dev *dev, void *dst, size_t offset,
 
   while (done < size) {
     window += VEL_WINDOW_SIZE;
-    if (!velocitor_window_seek(device, window))
-      return -EIO;
+    if (!velocitor_window_seek(device, window)) {
+      err = -EIO;
+      goto out;
+    }
 
     size_t todo = min(size - done, VEL_WINDOW_SIZE);
     memcpy_fromio(dst + done, device->bar2 + VEL_BAR2_WINDOW_OFF, todo);
     done += todo;
   }
 
+out:
   mutex_unlock(&device->lock_winbase);
-
-  return 0;
+  return err;
 }
