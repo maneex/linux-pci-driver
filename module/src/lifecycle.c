@@ -37,8 +37,6 @@ static int velocitor_release(struct pci_dev *dev,
       pci_iounmap(dev, device->bar0);
     if (NULL != device->bar2)
       pci_iounmap(dev, device->bar2);
-    if (NULL != device->bar4)
-      pci_iounmap(dev, device->bar4);
     pci_release_regions(dev);
     fallthrough;
 
@@ -94,13 +92,6 @@ static int initialize_bar2(struct pci_dev *dev, struct Device *device) {
   if (NULL == device->bar2)
     return -ENOMEM;
 
-  return 0;
-}
-
-static int initialize_bar4(struct pci_dev *dev, struct Device *device) {
-  device->bar4 = pci_iomap(dev, 4, 0);
-  if (NULL == device->bar4)
-    return -ENOMEM;
   return 0;
 }
 
@@ -177,8 +168,6 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   if ((err = initialize_bar0(dev, device)))
     return velocitor_release(dev, INIT_STATE_IOMAP, err);
   if ((err = initialize_bar2(dev, device)))
-    return velocitor_release(dev, INIT_STATE_IOMAP, err);
-  if ((err = initialize_bar4(dev, device)))
     return velocitor_release(dev, INIT_STATE_IOMAP, err);
 
   // Set the DMA mask size (for both coherent and streaming DMA)

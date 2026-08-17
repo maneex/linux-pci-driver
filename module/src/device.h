@@ -4,7 +4,6 @@
 struct Device {
   void __iomem *bar0;
   void __iomem *bar2;
-  void __iomem *bar4;
 };
 
 enum InitialisationState {
