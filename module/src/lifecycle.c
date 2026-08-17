@@ -69,7 +69,7 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
             magic, VEL_FW_MAGIC);
     return -ENODEV;
   }
-  pr_info("velocitor.bar0: magic verified");
+  dev_info(&dev->dev, "bar0: magic verified");
 
   // Check SCRATCH
   const u32 scratches[] = {0x42000042, 0x12345678};
@@ -85,8 +85,8 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
   }
 
   u32 version = readl(device->bar0 + VEL_REG_VERSION);
-  pr_info("velocitor.bar0: device version %d.%d", version >> 16,
-          version & 0xff);
+  dev_info(&dev->dev, "bar0: device version %d.%d", version >> 16,
+           version & 0xff);
 
   return 0;
 }
@@ -104,46 +104,38 @@ static int initialize_dma_engine(struct pci_dev *dev, struct Device *device) {
   pci_set_master(dev);
   if ((err = dma_set_mask_and_coherent(&dev->dev, VEL_DMA_BITS)))
     return err;
-  dev_info(&dev->dev, "velocitor.dma.init: %d bits", VEL_DMA_BITS);
+  dev_info(&dev->dev, "dma: width %d bits", VEL_DMA_BITS);
   return 0;
 }
 
 // https://docs.kernel.org/PCI/msi-howto.html
 // https://kernel-internals.org/interrupts/threaded-irq/
 static int initialize_irq_handlers(struct pci_dev *dev, struct Device *device) {
-  dev_info(&dev->dev, "irq.alloc");
   int err = 0;
   if ((6 != pci_alloc_irq_vectors(dev, 6, 6, PCI_IRQ_MSIX)))
     return err;
 
-  dev_info(&dev->dev, "irq.vectors");
   // FIXME! IRQ handler affinity ?
   // FIXME! Threaded IRQ ?
   if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 0),
                               irq_config_event, 0, "velocitor-cfg", dev)))
     return err;
-  dev_info(&dev->dev, "irq.cfg");
   if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 1),
                               irq_queue0_event, 0, "velocitor-q0", dev)))
     return err;
-  dev_info(&dev->dev, "irq.q0");
   if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 2),
                               irq_queue1_event, 0, "velocitor-q1", dev)))
     return err;
-  dev_info(&dev->dev, "irq.q1");
   if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 3),
                               irq_queue2_event, 0, "velocitor-q2", dev)))
     return err;
-  dev_info(&dev->dev, "irq.q2");
   if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 4),
                               irq_queue3_event, 0, "velocitor-q3", dev)))
     return err;
-  dev_info(&dev->dev, "irq.q3");
 
   if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 5),
                               irq_error_event, 0, "velocitor-err", dev)))
     return err;
-  dev_info(&dev->dev, "irq.err");
   return 0;
 }
 
@@ -155,18 +147,17 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   if (NULL == device)
     return -ENOMEM;
   pci_set_drvdata(dev, device);
-  pr_info("velocitor.[%s].pci_probe: device found", pci_name(dev));
+  dev_info(&dev->dev, "probe: device found");
 
   //  Enable the device
   if ((err = pci_enable_device(dev)))
     return velocitor_release(dev, INIT_STATE_PROBED, err);
-  pr_info("velocitor.pci_probe[%s]: device enabled", pci_name(dev));
+  dev_info(&dev->dev, "probe: device enabled");
 
   // Request MMIO/IOP resources
   if ((err = pci_request_regions(dev, KBUILD_MODNAME)))
     return velocitor_release(dev, INIT_STATE_ENABLED, err);
-  pr_info("velocitor.[%s].pci_probe: request regions as %s", pci_name(dev),
-          KBUILD_MODNAME);
+  dev_info(&dev->dev, "probe: request regions as %s", KBUILD_MODNAME);
 
   if ((err = initialize_bar0(dev, device)))
     return velocitor_release(dev, INIT_STATE_IOMAP, err);
@@ -186,7 +177,7 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   // Initialize non-PCI (i.e. LAN/SCSI/etc parts of the chip)
   // Enable DMA/processing engines
 
-  pr_info("velocitor.[%s].pci_probe: initialisation complete", pci_name(dev));
+  dev_info(&dev->dev, "probe: initialisation complete");
 
   return 0;
 }
@@ -212,7 +203,7 @@ static struct pci_driver velocitor_pci_driver = {
     .dev_groups = NULL};
 
 static int __init init_(void) {
-  pr_info("Loading velocitor driver");
+  pr_info("velocitor: loading driver");
   return pci_register_driver(&velocitor_pci_driver);
 }
 
@@ -225,7 +216,7 @@ static void __exit exit_(void) {
   // Release MMIO/IOP resources
   // Disable the device
 
-  pr_info("Unloading velocitor driver");
+  pr_info("velocitor: unloading driver");
   pci_unregister_driver(&velocitor_pci_driver);
 }
 
