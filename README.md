@@ -153,24 +153,33 @@ compile avec QEMU, il ne se charge pas dedans. L'arbre est dans
 
 `velocitor_hw.h` est l'amorce de **l'en-tête partagé** réclamé par §2 et §C.2 :
 il ne dépend d'aucun en-tête QEMU, noyau ou libc, précisément pour pouvoir
-être consommé tel quel par les trois côtés. Quand le driver l'adoptera,
-`module/include/pci.h` disparaît.
+être consommé tel quel par les trois côtés. Le driver l'a adopté :
+`module/include/pci.h` a disparu, et `module/Makefile` ajoute
+`-I$(src)/../qemu-device/`.
 
 ### Ce qui est implémenté aujourd'hui
 
-Le driver n'a qu'un `probe`, donc le modèle s'arrête au même endroit :
+Les étapes 2 et 3 du §13, des deux côtés :
 
 - identité PCI et disposition des capacités (§2.1, §3) ;
 - les trois BAR, avec type et taille contractuels ;
 - le bloc d'identité de BAR0 et `SCRATCH` (§4.1) : `MAGIC`, `VERSION`, `CAPS`,
   `SCRATCH`, `MEM_SIZE`, `TOPOLOGY`, `DMA_BITS` ;
+- les 20 compteurs du §4.5, avec `CNT_SNAP` et `CNT_RESET` : les lectures
+  répondent depuis l'instantané, jamais depuis les valeurs vives ;
+- MSI-X sur BAR4, six vecteurs, plus `IRQ_STATUS` / `IRQ_MASK` / `IRQ_ACK`
+  (§3.3, §4.1) — seuls les vecteurs 0 et 5 latchent ;
+- `ERR_INJECT` bit 2 (§9), le déclencheur qui rend l'étape 3 falsifiable :
+  `FW_STATUS = 3` et vecteur 5 ;
 - les règles d'accès du §4 : 32 bits alignés uniquement, sinon `0xFFFFFFFF` en
-  lecture et écriture ignorée ; offset non implémenté → lecture 0.
+  lecture et écriture ignorée ; offset non implémenté → lecture 0 ; et les
+  registres WO du §A.3 rendent `0xFFFFFFFF` quand on les lit.
 
 Tout le reste de BAR0 répond comme réservé et journalise sous `LOG_UNIMP` en
-nommant la section de spec qui l'implémentera. BAR2 et BAR4 sont déclarés mais
-vides. Rien ne démarre de firmware, ne déplace de données ni ne lève
-d'interruption : il n'y a pas encore de machine à états à rater.
+nommant la section de spec qui l'implémentera. BAR2 est déclarée mais vide.
+Rien ne démarre de firmware ni ne déplace de données ; l'erreur levée par
+l'injection n'est pas encore *qualifiée*, le bloc `ERR_CODE` du §4.4 n'existant
+pas.
 
 Pour voir ces journaux :
 
@@ -192,7 +201,15 @@ script programme les BAR à la main par les ports de configuration
 Ce qu'il couvre aujourd'hui : `MAGIC`, `VERSION`, `CAPS`, `MEM_SIZE`,
 `TOPOLOGY`, `DMA_BITS`, la relecture inversée de `SCRATCH`, les quatre règles
 d'accès du §4 (1 octet, 8 octets, non aligné, offset réservé), le rejet d'une
-écriture sur registre en lecture seule, et les deux BAR stub. 17 cas.
+écriture sur registre en lecture seule, la BAR2 stub, le bloc de compteurs et
+ses deux registres en écriture seule, la capacité MSI-X et ses deux champs BIR
+lus en espace de configuration, et le cycle complet de l'étape 3 — injection,
+`FW_STATUS = 3`, latch du vecteur 5, `IRQ_ACK`, retour à zéro. 36 cas.
+
+Le dernier de ces cas est le seul test réel de l'instantané du §4.5 :
+`CNT_NOTIFY_TX` lit `0` avant `CNT_SNAP` et `1` après, sur le même
+compteur vif. Tant que rien ne s'incrémentait, le mécanisme n'était pas
+falsifiable.
 
 L'énumération elle-même — `1b36:0100`, classe `0x1200`, BAR0 4 Ko
 non-prefetchable, BAR2 32 Mo 64 bits prefetchable, BAR4 8 Ko, aucun pin
@@ -223,7 +240,8 @@ Ce que Linux 6.18.44 en voit, et qui correspond au §3 :
 
 Et `cma: Reserved 128 MiB` dans `dmesg`, le préalable du §2.
 
-Le module, lui, ne *bind* pas encore : voir les divergences ci-dessous.
+Le module *bind* désormais, et ses six vecteurs MSI-X apparaissent dans
+`/proc/interrupts` de l'invité.
 
 ### Ce qui ne l'est pas
 
@@ -231,8 +249,6 @@ Par étape du §13, dans l'ordre des dépendances :
 
 | Étape | Manque côté modèle |
 |---|---|
-| 2 | compteurs et `CNT_SNAP` (§4.5) |
-| 3 | MSI-X : `msix_init` sur BAR4, `IRQ_STATUS` / `IRQ_MASK` / `IRQ_ACK` (§3.3, §4.1) |
 | 4 | contenu de BAR2 : aperture fixe, fenêtre glissante, `WIN_BASE` et son *read-back* (§3.1, §9) |
 | 5 | `DBG_DMA_*` et le bus-mastering (§4.3, annexe D.1/D.2) |
 | 6 | `RESET`, `FW_STATUS`, `GENERATION`, en-tête firmware, anneau de trace, table fantôme (§4.2, §6) |
@@ -242,18 +258,15 @@ Par étape du §13, dans l'ordre des dépendances :
 
 ## Divergences et décisions à valider
 
-Trois points sur lesquels le code prend position ; les noter au §16 quand ils
-sont tranchés.
+Deux points sur lesquels le code prend position ; les noter au §16 quand ils
+sont tranchés. Les décisions déjà tranchées pendant les étapes 2 et 3 y sont
+consignées.
 
-1. **Identifiants PCI.** Le modèle applique le §2.1 : `1b36:0100`.
-   `module/include/pci.h` porte `0x100` / `0x200`, valeurs de départ qui ne
-   correspondent à rien. Tant qu'elles ne sont pas alignées, le driver ne
-   *bind* pas — le module se charge et rien ne se passe.
-2. **`VERSION` n'est pas fixé par la spec.** Le modèle rend `0.6`
+1. **`VERSION` n'est pas fixé par la spec.** Le modèle rend `0.6`
    (`major << 16 | minor`), suivant la révision du contrat implémenté, pour que
    le driver puisse refuser un modèle plus ancien que lui. À entériner ou à
    remplacer.
-3. **`CAPS` vaut `0x7`** — fp32, bf16, transposition. C'est le matériel qui
+2. **`CAPS` vaut `0x7`** — fp32, bf16, transposition. C'est le matériel qui
    les a ; ce qui se négocie à l'étape 11 est leur *usage* (§8.1). L'écart
    `CAPS` / `INFO` reste le diagnostic croisé du §7.3, il n'est pas préjugé
    ici.

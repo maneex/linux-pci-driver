@@ -187,10 +187,10 @@ d'abord, jamais en adaptant silencieusement une des deux implémentations.
 |---|---|
 | Spécification | v0.6.3 — close ; cf. C.6 |
 | Versions Linux et QEMU épinglées | **Linux 6.18.44 · QEMU 7.2.22** — liste de vérification §C.4 **non exécutée** |
-| Modèle QEMU | non commencé |
-| Driver noyau | non commencé |
+| Modèle QEMU | étapes 2 et 3 faites : identité PCI, les trois BAR, bloc d'identité et `SCRATCH`, compteurs et `CNT_SNAP`, MSI-X sur BAR4 et `IRQ_STATUS`/`IRQ_MASK`/`IRQ_ACK`, `ERR_INJECT` bit 2. Reste BAR2 (étape 4) et la suite |
+| Driver noyau | étapes 2 et 3 faites : `probe` en devres intégral, BAR0 et BAR2 mappées, masque DMA, six vecteurs MSI-X, handler d'erreur qui acquitte, debugfs `counters` / `counters_reset` / `err_inject` |
 | Runtime utilisateur | non commencé |
-| En-tête partagé des constantes | non écrit |
+| En-tête partagé des constantes | écrit — `qemu-device/velocitor_hw.h`, consommé tel quel par le modèle et par le driver |
 
 ### 0.8 Glossaire minimal
 
@@ -1670,6 +1670,14 @@ Le modèle QEMU se prête bien à ASan et UBSan, et au *fuzzing* de modèles de 
   version épinglée.
 - **SR-IOV** — extension possible, hors périmètre : répond à une question d'isolation entre
   locataires, pas de parallélisme.
+- **Désarmement des injections à usage unique** — les bits 0, 5 et 8 du §9 portent sur « la
+  prochaine » opération. Le bit se désarme-t-il quand l'injection est consommée, ou reste-t-il
+  jusqu'à ce que le driver l'efface ? Le modèle de l'étape 3 ne fait ni l'un ni l'autre : il
+  mémorise ce qui a été écrit, ce qui rend `ERR_INJECT` relisible mais ambigu sur ces trois
+  bits — un `cat` montre ce qui a été armé, pas ce qui reste armé. Sans conséquence tant que
+  seul le bit 2, permanent par nature, est implémenté. **À trancher à l'étape 13**, quand les
+  injections concernées existeront ; le §12 item 6 exige de rendre compte du comportement sous
+  chacune, ce qui suppose de savoir laquelle est encore active.
 
 Sont sortis des points ouverts en v0.6.3 : les identifiants PCI (§2.1, valeurs assignées) et
 le dimensionnement de `VEL_MEM_SIZE`, qui n'était une dette que par rapport à l'étape
@@ -1825,6 +1833,13 @@ le projet doit permettre de formuler.
 | **v0.6.3** | **Safetensors retiré** | **n'ajoute rien à la preuve visée ; son retrait libère aussi le dimensionnement de `VEL_MEM_SIZE`, qui cesse d'être une dette** |
 | étape 0 | Référentiel épinglé : Linux **6.18.44** (longterm), QEMU **7.2.22** (`stable-7.2`) | 7.2.22 est la version de Debian 12, donc celle de la machine de développement : aucun QEMU à maintenir en parallèle du paquet, et un arbre dont la version est déjà connue de l'hôte. Le décalage de trois ans avec 6.18.44 est sans effet — le modèle n'expose que du PCI |
 | étape 0 | `aw-bits` confirmé disponible dans l'`intel-iommu` de QEMU 7.2.22 (défaut 39) | le point ouvert du §9.1 passe d'« à trancher » à « candidat identifié, validation empirique à l'étape 5 » (§14) |
+| étape 2 | Bloc de compteurs indexé, pas énuméré : `VEL_CNT_FIRST`, `VEL_CNT_LAST`, `VEL_CNT_COUNT`, `VEL_CNT_INDEX()` dans l'en-tête partagé | les 20 compteurs du §4.5 sont contigus et tous 32 bits. Énumérer les offsets des deux côtés, c'est deux occasions de diverger sur *combien* il y en a — et l'écart ne se verrait qu'au moment où un compteur cesserait d'être à zéro |
+| étape 2 | Une lecture de compteur avant tout `CNT_SNAP` rend `0` | le §4.5 dit ce que `CNT_SNAP` fige, pas ce que rend une lecture qui ne l'a jamais suivi. L'instantané est mis à zéro au reset, donc la réponse est zéro. L'alternative — rendre la valeur vive tant qu'aucun instantané n'a été pris — donnerait un registre dont la sémantique change après la première écriture de `CNT_SNAP`, ce qui est pire à documenter qu'à coder |
+| étape 2 | `CNT_SNAP` et `CNT_RESET` agissent sur le bit 0, pas sur la valeur exacte `1` | le §4.5 dit « écrire 1 ». Exiger l'égalité stricte ferait échouer en silence un driver qui écrit un mot de drapeaux plus large ; agir sur le bit 0 accepte les deux et ne rend aucune écriture ambiguë |
+| étape 3 | Table MSI-X à `BAR4 + 0x0000`, PBA à `BAR4 + 0x1000` (`VEL_MSIX_TABLE_OFF`, `VEL_MSIX_PBA_OFF`) | le §3 fixe la BAR et ses 8 Kio, pas le découpage interne. Table à la base et PBA à la moitié suit la convention QEMU et laisse les deux alignés sur 4 Kio. Un driver n'en a jamais besoin — le cœur PCI les lit dans la capacité — mais la couche 1 du §13.1 et une seconde implémentation, si |
+| étape 3 | `msix_init()` avec régions explicites, pas `msix_init_exclusive_bar()` | cette dernière code en dur `bar_size = 4096` et produirait une BAR4 de 4 Kio, alors que la taille est contractuelle au §3 |
+| étape 3 | `IRQ_MASK` supprime le message MSI-X mais **pas** le latch ; démasquer ne rejoue pas | le §4.1 donne le sens du bit (« 1 = masqué ») sans dire ce qu'il advient de `IRQ_STATUS`. Latcher quand même préserve le diagnostic — le driver voit ce qui s'est passé même s'il n'a pas été réveillé. Ne pas rejouer évite une file d'interruptions différées dont le §3.3 n'a aucun besoin : les deux seuls vecteurs concernés sont la configuration et l'erreur |
+| étape 3 | `ERR_INJECT` bit 2 câblé à l'étape 3, avant le bloc d'erreur qualifiée du §4.4 | le critère de l'étape 3 est « interruption **reçue et acquittée** ». Sans un moyen de lever un vecteur, aucun bit ne peut jamais entrer dans `IRQ_STATUS`, donc `IRQ_ACK` reste du code non exercé et l'étape n'est pas falsifiable. Le bit 2 du §9 est le déclencheur le moins cher que le contrat définisse déjà, et il resservira à l'item 6 du §12. Conséquence assumée : le vecteur 5 est levé **sans être qualifié** — pas d'`ERR_CODE = 10` tant que le §4.4 n'existe pas |
 
 ### Décisions écartées, et pourquoi
 
