@@ -1,9 +1,15 @@
+// Linux headers.
+#include <linux/dcache.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 
+// Velocitor headers.
 #include "../../qemu-device/velocitor_hw.h"
+
+// Driver headers.
+#include "debugfs.h"
 #include "device.h"
 #include "irq.h"
 
@@ -13,6 +19,8 @@ static const struct pci_device_id pci_id_table[] = {
         0,
     }};
 MODULE_DEVICE_TABLE(pci, pci_id_table);
+
+static struct dentry *velocitor_debugfs_root = 0;
 
 // https : // www.kernel.org/doc/html/v6.0/PCI/pci.html
 
@@ -120,6 +128,8 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   pci_set_drvdata(dev, device);
   dev_info(&dev->dev, "probe: device found");
 
+  velocitor_debugfs_initialize(dev, velocitor_debugfs_root);
+
   //  Enable the device
   if ((err = pcim_enable_device(dev)))
     return err;
@@ -169,6 +179,7 @@ static struct pci_driver velocitor_pci_driver = {
 
 static int __init init_(void) {
   pr_info("velocitor: loading driver");
+  velocitor_debugfs_root = debugfs_create_dir(KBUILD_MODNAME, NULL);
   return pci_register_driver(&velocitor_pci_driver);
 }
 
@@ -183,6 +194,7 @@ static void __exit exit_(void) {
 
   pr_info("velocitor: unloading driver");
   pci_unregister_driver(&velocitor_pci_driver);
+  debugfs_remove_recursive(velocitor_debugfs_root);
 }
 
 module_init(init_);

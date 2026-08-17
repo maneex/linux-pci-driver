@@ -1,6 +1,7 @@
 obj-m += velocitor.o
 velocitor-y := src/lifecycle.o
 velocitor-y += src/irq.o
+velocitor-y += src/debugfs.o
 velocitor-y += src/counters.o
 
 ccflags-y += -I$(src)/include -I$(src)/../qemu-device/
