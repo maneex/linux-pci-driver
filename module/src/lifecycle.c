@@ -19,8 +19,8 @@ MODULE_DEVICE_TABLE(pci, pci_id_table);
 static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
   // Get mapping
   device->bar0 = pcim_iomap_region(dev, 0, KBUILD_MODNAME);
-  if (NULL == device->bar0)
-    return -ENOMEM;
+  if (IS_ERR(device->bar0))
+    return PTR_ERR(device->bar0);
 
   // Check MAGIC
   u32 magic = readl(device->bar0 + VEL_REG_MAGIC);
@@ -54,8 +54,8 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
 
 static int initialize_bar2(struct pci_dev *dev, struct Device *device) {
   device->bar2 = pcim_iomap_region(dev, 2, KBUILD_MODNAME);
-  if (NULL == device->bar2)
-    return -ENOMEM;
+  if (IS_ERR(device->bar2))
+    return PTR_ERR(device->bar2);
 
   return 0;
 }
