@@ -20,6 +20,9 @@
  *     the WIN_BASE read-back                  (spec 3.1, 9)
  *   - the bring-up DMA block, asynchronous, with the 42-bit address trap
  *                                             (spec 4.3, 9.1, annex D.1/D.2)
+ *   - the shadow resource table registers, and the shallow check the model
+ *     makes of the table when RSC_VALID goes up
+ *                                             (spec 4.2, 6.4)
  *   - ERR_INJECT bits 2 and 6, the firmware crash and the swallowed
  *     WIN_BASE write                          (spec 9)
  *   - the BAR0 access rules: 32-bit aligned only, reserved offsets read 0
@@ -120,6 +123,17 @@ struct VelocitorState {
     uint32_t dma_len;
     uint32_t dma_ctl;
     uint32_t dma_status;
+
+    /*
+     * Shadow resource table, spec sections 4.2 and 6.4.  The device never
+     * writes it: the table belongs to Linux, and this is only where the
+     * driver says it put its copy.  Reading it is what will let the model
+     * see the negotiated features rather than the offered ones -- the
+     * distinction section 8.1 insists on.
+     */
+    uint32_t rsc_addr_lo, rsc_addr_hi;
+    uint32_t rsc_len;
+    uint32_t rsc_valid;
 
     /* Qualified error, spec section 4.4 -- only what step 5 can raise */
     uint32_t err_code;
@@ -309,11 +323,21 @@ static void velocitor_mem_fill_pattern(VelocitorState *s)
  * matters is that the busy state exists and lasts a knowable while. */
 #define VEL_DMA_LATENCY_NS 1000
 
-static void velocitor_dma_fail(VelocitorState *s, uint32_t code, uint64_t info)
+/*
+ * Qualify an error, spec section 4.4.  Split out from the DMA path because
+ * the shadow table below reports through the same three registers without
+ * having a transfer status to set.
+ */
+static void velocitor_error_set(VelocitorState *s, uint32_t code, uint64_t info)
 {
     s->err_code = code;
     s->err_info_lo = (uint32_t)info;
     s->err_info_hi = (uint32_t)(info >> 32);
+}
+
+static void velocitor_dma_fail(VelocitorState *s, uint32_t code, uint64_t info)
+{
+    velocitor_error_set(s, code, info);
     s->dma_status = VEL_DMA_STATUS_ERROR;
 }
 
@@ -383,6 +407,107 @@ static void velocitor_dma_start(VelocitorState *s, uint32_t ctl)
 }
 
 /* ------------------------------------------------------------------ */
+/* Shadow resource table -- spec sections 4.2 and 6.4                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A resource table starts with ver, num and two reserved words; the array
+ * of entry offsets follows.  Anything shorter than that header cannot be a
+ * table at all, whatever it points at.
+ */
+#define VEL_RSC_HDR_SIZE  16u
+
+/*
+ * Read one 32-bit word out of the shadow table.
+ *
+ * Through the PCI DMA address space like every other host access (annex
+ * D.2), and behind the same 42-bit trap as the bring-up DMA: a table
+ * published above the device's reach is exactly the failure section 9.1
+ * exists to produce, and it would be absurd for it to be caught on the data
+ * path but not on the control path.
+ *
+ * Step 7 reads the notifyids through here, step 8 the negotiated features.
+ */
+static bool velocitor_rsc_read32(VelocitorState *s, uint32_t off, uint32_t *val)
+{
+    PCIDevice *pdev = PCI_DEVICE(s);
+    uint64_t base = ((uint64_t)s->rsc_addr_hi << 32) | s->rsc_addr_lo;
+    uint32_t raw;
+
+    if ((uint64_t)off + sizeof(raw) > s->rsc_len) {
+        velocitor_error_set(s, VEL_ERR_OUT_OF_BOUNDS, off);
+        return false;
+    }
+
+    if (base + off >= (1ULL << VEL_DMA_BITS)) {
+        velocitor_error_set(s, VEL_ERR_DMA_WIDTH, base + off);
+        return false;
+    }
+
+    if (pci_dma_read(pdev, base + off, &raw, sizeof(raw)) != MEMTX_OK) {
+        velocitor_error_set(s, VEL_ERR_DMA_WIDTH, base + off);
+        return false;
+    }
+
+    *val = le32_to_cpu(raw);
+    return true;
+}
+
+/*
+ * RSC_VALID going up is the driver saying "the table is readable now".  The
+ * model takes it at its word only after reading the two words that make a
+ * resource table one: a driver that publishes the wrong buffer, or the right
+ * buffer at the wrong address, is caught here rather than three steps later
+ * when a notifyid comes back as garbage.
+ *
+ * The check is deliberately shallow -- ver and num, nothing else.  Parsing
+ * the entries belongs to the step that consumes them, and duplicating the
+ * core's own validation would only create a second opinion to disagree with.
+ */
+static void velocitor_rsc_publish(VelocitorState *s, uint32_t val)
+{
+    uint32_t ver = 0;
+    uint32_t num = 0;
+
+    if (!(val & 1)) {
+        s->rsc_valid = 0;
+        return;
+    }
+
+    if (s->rsc_len < VEL_RSC_HDR_SIZE) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: RSC_VALID raised with RSC_LEN = %u, too "
+                      "short for a resource table header (spec 6.4)\n",
+                      s->rsc_len);
+        velocitor_error_set(s, VEL_ERR_BAD_DESC, s->rsc_len);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return;
+    }
+
+    if (!velocitor_rsc_read32(s, 0, &ver) ||
+        !velocitor_rsc_read32(s, 4, &num)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: shadow resource table at 0x%08x%08x is not "
+                      "readable by the device (spec 6.4)\n",
+                      s->rsc_addr_hi, s->rsc_addr_lo);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return;
+    }
+
+    if (ver != 1 || num == 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: shadow resource table has ver = %u, num = %u"
+                      " -- expected version 1 and at least one entry"
+                      " (spec 6.3)\n", ver, num);
+        velocitor_error_set(s, VEL_ERR_BAD_DESC, ver);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return;
+    }
+
+    s->rsc_valid = 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* BAR0 -- control registers, spec section 4                           */
 /* ------------------------------------------------------------------ */
 
@@ -439,6 +564,20 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
         return s->dma_len;
     case VEL_REG_DBG_DMA_STATUS:
         return s->dma_status;
+
+    case VEL_REG_RSC_ADDR_LO:
+        return s->rsc_addr_lo;
+    case VEL_REG_RSC_ADDR_HI:
+        return s->rsc_addr_hi;
+    case VEL_REG_RSC_LEN:
+        return s->rsc_len;
+    case VEL_REG_RSC_VALID:
+        /*
+         * Reads back what the device accepted, not what was written: a
+         * driver that publishes a table the device cannot read sees a zero
+         * here and knows immediately.
+         */
+        return s->rsc_valid;
 
     case VEL_REG_ERR_CODE:
         return s->err_code;
@@ -540,6 +679,21 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
         return;
     case VEL_REG_DBG_DMA_CTL:
         velocitor_dma_start(s, (uint32_t)val);
+        return;
+
+    case VEL_REG_RSC_ADDR_LO:
+        s->rsc_addr_lo = (uint32_t)val;
+        return;
+    case VEL_REG_RSC_ADDR_HI:
+        s->rsc_addr_hi = (uint32_t)val;
+        return;
+    case VEL_REG_RSC_LEN:
+        s->rsc_len = (uint32_t)val;
+        return;
+    case VEL_REG_RSC_VALID:
+        /* Written last (spec 4.2): this is the commit point of the three
+         * registers above, and where the model first touches the table. */
+        velocitor_rsc_publish(s, (uint32_t)val);
         return;
 
     case VEL_REG_IRQ_MASK:
@@ -716,6 +870,12 @@ static void velocitor_reset(DeviceState *dev)
     s->err_info_lo = 0;
     s->err_info_hi = 0;
 
+    /* The shadow table belongs to a boot that is over (spec 6.5). */
+    s->rsc_addr_lo = 0;
+    s->rsc_addr_hi = 0;
+    s->rsc_len = 0;
+    s->rsc_valid = 0;
+
     s->win_base = 0;
     s->win_pending = 0;
     memory_region_set_alias_offset(&s->window, 0);
@@ -732,8 +892,8 @@ static void velocitor_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_velocitor = {
     .name = "velocitor",
-    .version_id = 5,
-    .minimum_version_id = 5,
+    .version_id = 6,
+    .minimum_version_id = 6,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, VelocitorState),
         VMSTATE_UINT32(scratch, VelocitorState),
@@ -747,6 +907,10 @@ static const VMStateDescription vmstate_velocitor = {
         VMSTATE_UINT32(dma_len, VelocitorState),
         VMSTATE_UINT32(dma_ctl, VelocitorState),
         VMSTATE_UINT32(dma_status, VelocitorState),
+        VMSTATE_UINT32(rsc_addr_lo, VelocitorState),
+        VMSTATE_UINT32(rsc_addr_hi, VelocitorState),
+        VMSTATE_UINT32(rsc_len, VelocitorState),
+        VMSTATE_UINT32(rsc_valid, VelocitorState),
         VMSTATE_UINT32(err_code, VelocitorState),
         VMSTATE_UINT32(err_info_lo, VelocitorState),
         VMSTATE_UINT32(err_info_hi, VelocitorState),

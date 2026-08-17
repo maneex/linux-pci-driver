@@ -199,6 +199,46 @@ CHECKS=(
     "CNT_DMA_RD = 1            |readl $((BAR0 + 0xb0))|0x0000000000000001"
     "CNT_DMA_WR = 1            |readl $((BAR0 + 0xb4))|0x0000000000000001"
     "CNT_BYTES_RD = 4          |readl $((BAR0 + 0xb8))|0x0000000000000004"
+
+    # Shadow resource table, spec 4.2 and 6.4.  The driver says where it put
+    # its copy of the table; the device believes it only after reading the
+    # two words that make a resource table one.  A driver that publishes the
+    # wrong buffer is caught here rather than three steps later, when a
+    # notifyid comes back as garbage.
+    "RSC_VALID at reset        |readl $((BAR0 + 0xfc))|0x0000000000000000"
+    "seed a table, ver = 1     |write 0x1100000 4 0x01000000|"
+    "and              num = 1  |write 0x1100004 4 0x01000000|"
+    "RSC_ADDR_LO               |writel $((BAR0 + 0xf0)) 0x01100000|"
+    "RSC_ADDR_HI               |writel $((BAR0 + 0xf4)) 0x00000000|"
+    "RSC_LEN = 16              |writel $((BAR0 + 0xf8)) 0x00000010|"
+    "RSC_ADDR_LO reads back    |readl $((BAR0 + 0xf0))|0x0000000001100000"
+    "RSC_LEN reads back        |readl $((BAR0 + 0xf8))|0x0000000000000010"
+    "publish it                |writel $((BAR0 + 0xfc)) 0x00000001|"
+    "device accepted the table |readl $((BAR0 + 0xfc))|0x0000000000000001"
+    "withdraw it               |writel $((BAR0 + 0xfc)) 0x00000000|"
+    "RSC_VALID back to 0       |readl $((BAR0 + 0xfc))|0x0000000000000000"
+
+    # Too short to hold even the table header: refused without a single DMA
+    # read, since there is nothing there worth reading.
+    "RSC_LEN = 8               |writel $((BAR0 + 0xf8)) 0x00000008|"
+    "publish it                |writel $((BAR0 + 0xfc)) 0x00000001|"
+    "device refused it         |readl $((BAR0 + 0xfc))|0x0000000000000000"
+    "ERR_CODE = 1 (bad desc)   |readl $((BAR0 + 0x50))|0x0000000000000001"
+
+    # Version 2 does not exist -- the remoteproc core would not accept it
+    # either, so the two sides agree on what a table is.
+    "RSC_LEN = 16              |writel $((BAR0 + 0xf8)) 0x00000010|"
+    "make the table version 2  |write 0x1100000 4 0x02000000|"
+    "publish it                |writel $((BAR0 + 0xfc)) 0x00000001|"
+    "device refused it         |readl $((BAR0 + 0xfc))|0x0000000000000000"
+    "ERR_CODE = 1 (bad desc)   |readl $((BAR0 + 0x50))|0x0000000000000001"
+
+    # The 42-bit trap guards the control path too, not only the data path.
+    "restore version 1         |write 0x1100000 4 0x01000000|"
+    "RSC_ADDR_HI = 2^42 >> 32  |writel $((BAR0 + 0xf4)) 0x00000400|"
+    "publish it                |writel $((BAR0 + 0xfc)) 0x00000001|"
+    "device refused it         |readl $((BAR0 + 0xfc))|0x0000000000000000"
+    "ERR_CODE = 4 (DMA width)  |readl $((BAR0 + 0x50))|0x0000000000000004"
 )
 
 commands=("${SETUP[@]}")
