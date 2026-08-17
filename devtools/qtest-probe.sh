@@ -31,8 +31,11 @@ BAR0=0xc0000000
 BAR4=0xc4000000
 BAR2=0xc8000000
 
-# Bring the BARs up: write the base addresses, then enable memory decoding in
-# the command register.  No firmware has run, so nothing is assigned yet.
+# Bring the BARs up: write the base addresses, then enable memory decoding and
+# bus mastering in the command register.  No firmware has run, so nothing is
+# assigned yet.  Bus mastering (bit 2) is what pci_set_master() turns on in the
+# driver; without it the device DMA address space is disabled and every
+# pci_dma_read() of section 4.3 fails.
 # BAR2 is the 64-bit one, so it takes config slots 0x18 and 0x1c and BAR4
 # lands at 0x20 -- the layout spec section 3 calls out.
 SETUP=(
@@ -40,7 +43,7 @@ SETUP=(
     "outl 0xcf8 $((CFG_BASE + 0x18))"  "outl 0xcfc $BAR2"
     "outl 0xcf8 $((CFG_BASE + 0x1c))"  "outl 0xcfc 0x00000000"
     "outl 0xcf8 $((CFG_BASE + 0x20))"  "outl 0xcfc $BAR4"
-    "outl 0xcf8 $((CFG_BASE + 0x04))"  "outl 0xcfc 0x00000002"
+    "outl 0xcf8 $((CFG_BASE + 0x04))"  "outl 0xcfc 0x00000006"
 )
 
 # label | qtest command | expected response, as qtest prints it
@@ -150,6 +153,52 @@ CHECKS=(
     "CNT_NOTIFY_TX before snap |readl $((BAR0 + 0x9c))|0x0000000000000000"
     "CNT_SNAP write            |writel $((BAR0 + 0x94)) 0x00000001|"
     "CNT_NOTIFY_TX after snap  |readl $((BAR0 + 0x9c))|0x0000000000000001"
+
+    # Bring-up DMA, spec 4.3.  qtest can seed guest RAM directly, so a full
+    # host <-> device round trip is checkable with no kernel in sight.  RAM at
+    # 16 MiB is well inside the q35 default.
+    "seed guest RAM            |write 0x1000000 4 0x11223344|"
+    "DBG_DMA_ADDR_LO          |writel $((BAR0 + 0x70)) 0x01000000|"
+    "DBG_DMA_ADDR_HI          |writel $((BAR0 + 0x74)) 0x00000000|"
+    "DBG_DMA_DEV = 0x1000     |writel $((BAR0 + 0x78)) 0x00001000|"
+    "DBG_DMA_LEN = 4          |writel $((BAR0 + 0x7c)) 0x00000004|"
+    "read of DBG_DMA_CTL is WO |readl $((BAR0 + 0x80))|0x00000000ffffffff"
+    "trigger H2D              |writel $((BAR0 + 0x80)) 0x00000001|"
+    "DBG_DMA_STATUS = busy     |readl $((BAR0 + 0x84))|0x0000000000000001"
+    "let virtual time pass    |clock_step 2000|"
+    "DBG_DMA_STATUS = done     |readl $((BAR0 + 0x84))|0x0000000000000002"
+    "device memory got it      |readl $((BAR2 + 0x1000))|0x0000000044332211"
+
+    # D2H: send the pattern word at device offset 0x2000 back out to RAM.
+    "DBG_DMA_DEV = 0x2000     |writel $((BAR0 + 0x78)) 0x00002000|"
+    "DBG_DMA_ADDR_LO          |writel $((BAR0 + 0x70)) 0x01000100|"
+    "trigger D2H              |writel $((BAR0 + 0x80)) 0x00000002|"
+    "let virtual time pass    |clock_step 2000|"
+    "DBG_DMA_STATUS = done     |readl $((BAR0 + 0x84))|0x0000000000000002"
+    "host RAM got the pattern  |read 0x1000100 4|0x00200000"
+
+    # The 42-bit trap of spec 9.1 and annex D.2, checked before any access.
+    "IOVA at exactly 2^42     |writel $((BAR0 + 0x74)) 0x00000400|"
+    "trigger H2D              |writel $((BAR0 + 0x80)) 0x00000001|"
+    "let virtual time pass    |clock_step 2000|"
+    "DBG_DMA_STATUS = error    |readl $((BAR0 + 0x84))|0x0000000000000003"
+    "ERR_CODE = 4 (DMA width)  |readl $((BAR0 + 0x50))|0x0000000000000004"
+    "ERR_INFO_HI holds the top |readl $((BAR0 + 0x58))|0x0000000000000400"
+
+    # Out of bounds on the device side.
+    "back to a legal IOVA     |writel $((BAR0 + 0x74)) 0x00000000|"
+    "DBG_DMA_DEV near the end |writel $((BAR0 + 0x78)) 0x0ffffffc|"
+    "DBG_DMA_LEN = 16         |writel $((BAR0 + 0x7c)) 0x00000010|"
+    "trigger H2D              |writel $((BAR0 + 0x80)) 0x00000001|"
+    "let virtual time pass    |clock_step 2000|"
+    "DBG_DMA_STATUS = error    |readl $((BAR0 + 0x84))|0x0000000000000003"
+    "ERR_CODE = 2 (out of bnds)|readl $((BAR0 + 0x50))|0x0000000000000002"
+
+    # One read and one write actually happened; the two failures counted none.
+    "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
+    "CNT_DMA_RD = 1            |readl $((BAR0 + 0xb0))|0x0000000000000001"
+    "CNT_DMA_WR = 1            |readl $((BAR0 + 0xb4))|0x0000000000000001"
+    "CNT_BYTES_RD = 4          |readl $((BAR0 + 0xb8))|0x0000000000000004"
 )
 
 commands=("${SETUP[@]}")

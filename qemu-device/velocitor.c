@@ -18,6 +18,8 @@
  *                                             (spec 3.3, 4.1)
  *   - device-local memory behind BAR2: fixed aperture, sliding window, and
  *     the WIN_BASE read-back                  (spec 3.1, 9)
+ *   - the bring-up DMA block, asynchronous, with the 42-bit address trap
+ *                                             (spec 4.3, 9.1, annex D.1/D.2)
  *   - ERR_INJECT bits 2 and 6, the firmware crash and the swallowed
  *     WIN_BASE write                          (spec 9)
  *   - the BAR0 access rules: 32-bit aligned only, reserved offsets read 0
@@ -25,9 +27,10 @@
  *
  * Everything else in BAR0 answers as reserved and logs under LOG_UNIMP with
  * the spec section that will implement it.  Nothing here starts a firmware
- * or moves data; the qualified error block of section 4.4 is not
- * implemented, so an injected crash raises vector 5 without an ERR_CODE to
- * go with it.
+ * or moves data outside the bring-up block.  Of the qualified error block of
+ * section 4.4 only ERR_CODE and ERR_INFO_* exist, filled by the DMA path;
+ * an injected firmware crash still raises vector 5 without an ERR_CODE to go
+ * with it.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -35,6 +38,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pcie.h"
@@ -95,6 +99,31 @@ struct VelocitorState {
     uint32_t irq_status;    /* 0x028 -- bits 0 and 5 only                 */
     uint32_t irq_mask;      /* 0x02C -- 1 = masked                        */
     uint32_t fw_status;     /* 0x020                                      */
+
+    /*
+     * Bring-up DMA, spec section 4.3.  The copy runs from a virtual-clock
+     * timer, never from the MMIO callback: annex D.1 forbids doing work in
+     * the callback, and a driver at step 5 has no interrupts yet, so it polls
+     * DBG_DMA_STATUS through 1 and then 2.  Copying inline would make the
+     * busy state unobservable and hide the asynchrony the driver has to cope
+     * with.
+     *
+     * A virtual timer rather than a bottom half, for two reasons.  It is
+     * deterministic, which section 9 requires of everything here; and it is
+     * steppable from qtest, where there is no CPU to run a bottom half at
+     * all -- layer 1 of section 13.1 could otherwise never see a transfer
+     * complete.
+     */
+    QEMUTimer *dma_timer;
+    uint32_t dma_addr_lo, dma_addr_hi;
+    uint32_t dma_dev;
+    uint32_t dma_len;
+    uint32_t dma_ctl;
+    uint32_t dma_status;
+
+    /* Qualified error, spec section 4.4 -- only what step 5 can raise */
+    uint32_t err_code;
+    uint32_t err_info_lo, err_info_hi;
 
     /* Error injection, spec section 9 */
     uint32_t err_inject;    /* 0x040                                      */
@@ -273,6 +302,87 @@ static void velocitor_mem_fill_pattern(VelocitorState *s)
 }
 
 /* ------------------------------------------------------------------ */
+/* Bring-up DMA -- spec section 4.3, annex D.1 and D.2                 */
+/* ------------------------------------------------------------------ */
+
+/* Simulated transfer latency, virtual time.  Arbitrary but fixed: what
+ * matters is that the busy state exists and lasts a knowable while. */
+#define VEL_DMA_LATENCY_NS 1000
+
+static void velocitor_dma_fail(VelocitorState *s, uint32_t code, uint64_t info)
+{
+    s->err_code = code;
+    s->err_info_lo = (uint32_t)info;
+    s->err_info_hi = (uint32_t)(info >> 32);
+    s->dma_status = VEL_DMA_STATUS_ERROR;
+}
+
+static void velocitor_dma_run(void *opaque)
+{
+    VelocitorState *s = opaque;
+    PCIDevice *pdev = PCI_DEVICE(s);
+    uint64_t iova = ((uint64_t)s->dma_addr_hi << 32) | s->dma_addr_lo;
+    uint8_t *mem = memory_region_get_ram_ptr(&s->mem);
+    MemTxResult res;
+
+    /*
+     * The 42-bit trap, spec section 9 and annex D.2: checked before any
+     * access, so the device never touches an address it has just declared
+     * out of its reach.  A driver with a correct mask never sees this; one
+     * built with dma_bits_override=64 sees it every time, which is the whole
+     * point of section 9.1.
+     */
+    if (iova >= (1ULL << VEL_DMA_BITS)) {
+        velocitor_dma_fail(s, VEL_ERR_DMA_WIDTH, iova);
+        return;
+    }
+
+    if ((uint64_t)s->dma_dev + s->dma_len > VEL_MEM_SIZE) {
+        velocitor_dma_fail(s, VEL_ERR_OUT_OF_BOUNDS, s->dma_dev);
+        s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_ERR_RANGE)]++;
+        return;
+    }
+
+    /*
+     * Host memory is reached through the PCI DMA address space, never
+     * through guest RAM directly (annex D.2).  That is what makes the vIOMMU
+     * test of section 9.1 measure anything at all.
+     */
+    if (s->dma_ctl == VEL_DBG_DMA_H2D) {
+        res = pci_dma_read(pdev, iova, mem + s->dma_dev, s->dma_len);
+        s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_DMA_RD)]++;
+        s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_BYTES_RD_LO)] += s->dma_len;
+    } else {
+        res = pci_dma_write(pdev, iova, mem + s->dma_dev, s->dma_len);
+        s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_DMA_WR)]++;
+        s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_BYTES_WR_LO)] += s->dma_len;
+    }
+
+    if (res != MEMTX_OK) {
+        velocitor_dma_fail(s, VEL_ERR_DMA_WIDTH, iova);
+        return;
+    }
+
+    s->dma_status = VEL_DMA_STATUS_DONE;
+}
+
+static void velocitor_dma_start(VelocitorState *s, uint32_t ctl)
+{
+    if (ctl != VEL_DBG_DMA_H2D && ctl != VEL_DBG_DMA_D2H) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: DBG_DMA_CTL = %u is neither H2D nor D2H"
+                      " (spec 4.3) -- ignored\n", ctl);
+        return;
+    }
+
+    s->dma_ctl = ctl;
+    s->err_code = VEL_ERR_NONE;
+    s->dma_status = VEL_DMA_STATUS_BUSY;
+    timer_mod(s->dma_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VEL_DMA_LATENCY_NS);
+}
+
+/* ------------------------------------------------------------------ */
 /* BAR0 -- control registers, spec section 4                           */
 /* ------------------------------------------------------------------ */
 
@@ -319,6 +429,24 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
         velocitor_window_promote(s);
         return s->win_base;
 
+    case VEL_REG_DBG_DMA_ADDR_LO:
+        return s->dma_addr_lo;
+    case VEL_REG_DBG_DMA_ADDR_HI:
+        return s->dma_addr_hi;
+    case VEL_REG_DBG_DMA_DEV:
+        return s->dma_dev;
+    case VEL_REG_DBG_DMA_LEN:
+        return s->dma_len;
+    case VEL_REG_DBG_DMA_STATUS:
+        return s->dma_status;
+
+    case VEL_REG_ERR_CODE:
+        return s->err_code;
+    case VEL_REG_ERR_INFO_LO:
+        return s->err_info_lo;
+    case VEL_REG_ERR_INFO_HI:
+        return s->err_info_hi;
+
     case VEL_REG_FW_STATUS:
         return s->fw_status;
     case VEL_REG_IRQ_STATUS:
@@ -330,6 +458,7 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
     case VEL_REG_ERR_INJECT_ARG:
         return s->err_inject_arg;
 
+    case VEL_REG_DBG_DMA_CTL:
     case VEL_REG_IRQ_ACK:
     case VEL_REG_CNT_RESET:
     case VEL_REG_CNT_SNAP:
@@ -397,6 +526,22 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
         velocitor_window_write_base(s, (uint32_t)val);
         return;
 
+    case VEL_REG_DBG_DMA_ADDR_LO:
+        s->dma_addr_lo = (uint32_t)val;
+        return;
+    case VEL_REG_DBG_DMA_ADDR_HI:
+        s->dma_addr_hi = (uint32_t)val;
+        return;
+    case VEL_REG_DBG_DMA_DEV:
+        s->dma_dev = (uint32_t)val;
+        return;
+    case VEL_REG_DBG_DMA_LEN:
+        s->dma_len = (uint32_t)val;
+        return;
+    case VEL_REG_DBG_DMA_CTL:
+        velocitor_dma_start(s, (uint32_t)val);
+        return;
+
     case VEL_REG_IRQ_MASK:
         s->irq_mask = (uint32_t)val & VEL_IRQ_LATCHED;
         return;
@@ -434,6 +579,10 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
     case VEL_REG_DMA_BITS:
     case VEL_REG_FW_STATUS:
     case VEL_REG_IRQ_STATUS:
+    case VEL_REG_DBG_DMA_STATUS:
+    case VEL_REG_ERR_CODE:
+    case VEL_REG_ERR_INFO_LO:
+    case VEL_REG_ERR_INFO_HI:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "velocitor: write 0x%08x to read-only register"
                       " 0x%" HWADDR_PRIx " -- ignored\n",
@@ -533,12 +682,15 @@ static void velocitor_realize(PCIDevice *pdev, Error **errp)
     for (unsigned v = 0; v < VEL_MSIX_VECTORS; v++) {
         msix_vector_use(pdev, v);
     }
+
+    s->dma_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, velocitor_dma_run, s);
 }
 
 static void velocitor_exit(PCIDevice *pdev)
 {
     VelocitorState *s = VELOCITOR(pdev);
 
+    timer_free(s->dma_timer);
     msix_uninit(pdev, &s->bar4, &s->bar4);
 }
 
@@ -549,6 +701,20 @@ static void velocitor_reset(DeviceState *dev)
     s->scratch = 0;
     memset(s->cnt, 0, sizeof(s->cnt));
     memset(s->cnt_snap, 0, sizeof(s->cnt_snap));
+
+    /* Annex D.3: cancel deferred work before anything else. */
+    if (s->dma_timer) {
+        timer_del(s->dma_timer);
+    }
+    s->dma_addr_lo = 0;
+    s->dma_addr_hi = 0;
+    s->dma_dev = 0;
+    s->dma_len = 0;
+    s->dma_ctl = 0;
+    s->dma_status = VEL_DMA_STATUS_IDLE;
+    s->err_code = VEL_ERR_NONE;
+    s->err_info_lo = 0;
+    s->err_info_hi = 0;
 
     s->win_base = 0;
     s->win_pending = 0;
@@ -566,8 +732,8 @@ static void velocitor_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_velocitor = {
     .name = "velocitor",
-    .version_id = 4,
-    .minimum_version_id = 4,
+    .version_id = 5,
+    .minimum_version_id = 5,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, VelocitorState),
         VMSTATE_UINT32(scratch, VelocitorState),
@@ -575,6 +741,15 @@ static const VMStateDescription vmstate_velocitor = {
         VMSTATE_UINT32_ARRAY(cnt_snap, VelocitorState, VEL_CNT_COUNT),
         VMSTATE_UINT32(win_base, VelocitorState),
         VMSTATE_UINT32(win_pending, VelocitorState),
+        VMSTATE_UINT32(dma_addr_lo, VelocitorState),
+        VMSTATE_UINT32(dma_addr_hi, VelocitorState),
+        VMSTATE_UINT32(dma_dev, VelocitorState),
+        VMSTATE_UINT32(dma_len, VelocitorState),
+        VMSTATE_UINT32(dma_ctl, VelocitorState),
+        VMSTATE_UINT32(dma_status, VelocitorState),
+        VMSTATE_UINT32(err_code, VelocitorState),
+        VMSTATE_UINT32(err_info_lo, VelocitorState),
+        VMSTATE_UINT32(err_info_hi, VelocitorState),
         VMSTATE_UINT32(irq_status, VelocitorState),
         VMSTATE_UINT32(irq_mask, VelocitorState),
         VMSTATE_UINT32(fw_status, VelocitorState),

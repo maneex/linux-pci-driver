@@ -171,6 +171,14 @@
 #define VEL_REG_DBG_DMA_CTL     0x080u  /* WO, 1 = H2D, 2 = D2H            */
 #define VEL_REG_DBG_DMA_STATUS  0x084u  /* RO                              */
 
+/* DBG_DMA_CTL commands and DBG_DMA_STATUS values, section 4.3 */
+#define VEL_DBG_DMA_H2D         1u
+#define VEL_DBG_DMA_D2H         2u
+#define VEL_DMA_STATUS_IDLE     0u
+#define VEL_DMA_STATUS_BUSY     1u
+#define VEL_DMA_STATUS_DONE     2u
+#define VEL_DMA_STATUS_ERROR    3u
+
 /* ---- counters, section 4.5 ---- */
 #define VEL_REG_CNT_RESET            0x090u  /* WO                         */
 #define VEL_REG_CNT_SNAP             0x094u  /* WO                         */
