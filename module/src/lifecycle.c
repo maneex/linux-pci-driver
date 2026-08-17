@@ -3,12 +3,12 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 
-#include "../include/pci.h"
+#include "../../qemu-device/velocitor_hw.h"
 #include "device.h"
 #include "irq.h"
 
 static const struct pci_device_id pci_id_table[] = {
-    {PCI_DEVICE(VELOCITOR_PCI_VENDORID, VELOCITOR_PCI_DEVICEID)},
+    {PCI_DEVICE(VEL_PCI_VENDOR_ID, VEL_PCI_DEVICE_ID)},
     {
         0,
     }};
@@ -62,11 +62,11 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
     return -ENOMEM;
 
   // Check MAGIC
-  u32 magic = readl(device->bar0 + BAR0_MAGIC_OFFSET);
-  if (BAR0_MAGIC_VALUE != magic) {
+  u32 magic = readl(device->bar0 + VEL_REG_MAGIC);
+  if (VEL_FW_MAGIC != magic) {
     dev_err(&dev->dev,
             "velocitor.bar0: invalid magic: got 0x%08x, expected 0x%08x\n",
-            magic, BAR0_MAGIC_VALUE);
+            magic, VEL_FW_MAGIC);
     return -ENODEV;
   }
   pr_info("velocitor.bar0: magic verified");
@@ -74,8 +74,8 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
   // Check SCRATCH
   const u32 scratches[] = {0x42000042, 0x12345678};
   for (int i = 0; i < 2; ++i) {
-    writel(scratches[i], device->bar0 + BAR0_SCRATCH_OFFSET);
-    u32 res = readl(device->bar0 + BAR0_SCRATCH_OFFSET);
+    writel(scratches[i], device->bar0 + VEL_REG_SCRATCH);
+    u32 res = readl(device->bar0 + VEL_REG_SCRATCH);
     if (~scratches[i] != res) {
       dev_err(&dev->dev,
               "velocitor.bar0: invalid scratch: got 0x%08x, expected 0x%08x\n",
@@ -84,7 +84,7 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
     }
   }
 
-  u32 version = readl(device->bar0 + BAR0_VERSION_OFFSET);
+  u32 version = readl(device->bar0 + VEL_REG_VERSION);
   pr_info("velocitor.bar0: device version %d.%d", version >> 16,
           version & 0xff);
 
@@ -102,10 +102,9 @@ static int initialize_bar2(struct pci_dev *dev, struct Device *device) {
 static int initialize_dma_engine(struct pci_dev *dev, struct Device *device) {
   int err = 0;
   pci_set_master(dev);
-  u32 dma_width = readl(device->bar0 + BAR0_DMABITS_OFFSET);
-  if ((err = dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(dma_width))))
+  if ((err = dma_set_mask_and_coherent(&dev->dev, VEL_DMA_BITS)))
     return err;
-  dev_info(&dev->dev, "velocitor.dma.init: %d bits", dma_width);
+  dev_info(&dev->dev, "velocitor.dma.init: %d bits", VEL_DMA_BITS);
   return 0;
 }
 
