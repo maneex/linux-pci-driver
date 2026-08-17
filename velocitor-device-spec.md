@@ -187,10 +187,12 @@ d'abord, jamais en adaptant silencieusement une des deux implémentations.
 |---|---|
 | Spécification | v0.6.3 — close ; cf. C.6 |
 | Versions Linux et QEMU épinglées | **Linux 6.18.44 · QEMU 7.2.22** — liste de vérification §C.4 **non exécutée** |
-| Modèle QEMU | étapes 2 et 3 faites : identité PCI, les trois BAR, bloc d'identité et `SCRATCH`, compteurs et `CNT_SNAP`, MSI-X sur BAR4 et `IRQ_STATUS`/`IRQ_MASK`/`IRQ_ACK`, `ERR_INJECT` bit 2. Reste BAR2 (étape 4) et la suite |
-| Driver noyau | étapes 2 et 3 faites : `probe` en devres intégral, BAR0 et BAR2 mappées, masque DMA, six vecteurs MSI-X, handler d'erreur qui acquitte, debugfs `counters` / `counters_reset` / `err_inject` |
+| Modèle QEMU | étapes 2 à 5 faites, étape 6 faite côté device : identité PCI et les trois BAR, `SCRATCH`, compteurs et `CNT_SNAP`, MSI-X et `IRQ_*`, BAR2 avec aperture fixe, fenêtre glissante et relecture de `WIN_BASE`, bloc `DBG_DMA_*` asynchrone avec le piège des 42 bits, registres de table fantôme, cycle de vie `RESET`/`FW_STATUS`/`FW_ABI`/`GENERATION` avec vérification de l'en-tête firmware. Reste le `DOORBELL`, la fenêtre `VQ_*` et tout le §4.4 au-delà d'`ERR_CODE`/`ERR_INFO_*` |
+| Firmware | généré — `firmware/mkfw.c` produit `velocitor-fw.elf` : en-tête du §6.6 et table de ressources du §6.3 (carveout `heap`, deux vdev de deux vrings). Aucun code, le modèle joue le processeur |
+| Driver noyau | étapes 2 à 5 faites : `probe` en devres intégral, BAR0 et BAR2 mappées, masque DMA et pool cohérent, six vecteurs MSI-X, lecture fenêtrée de la mémoire device, transferts `DBG_DMA_*` avec attente bornée, debugfs `counters` / `counters_reset` / `inject_error` / `dma_pool` / `dma_ctrl` / `mem`, tracepoints `irq`, `winmove` et `dma_dbg`. Étape 6 non commencée : pas de `rproc_ops` |
 | Runtime utilisateur | non commencé |
-| En-tête partagé des constantes | écrit — `qemu-device/velocitor_hw.h`, consommé tel quel par le modèle et par le driver |
+| Tests | couche 1 — `devtools/qtest-probe.sh`, 96 vérifications sans Linux. Couche 2 — `devtools/guest-dma-test.sh`, aller-retour DMA, contrôle croisé fenêtre / DMA et passe de *fuzzing* rejouable par graine. Couche 3 inexistante |
+| En-tête partagé des constantes | écrit — `qemu-device/velocitor_hw.h`, consommé tel quel par le modèle, le driver et le générateur de firmware |
 
 ### 0.8 Glossaire minimal
 
@@ -1658,8 +1660,12 @@ Le modèle QEMU se prête bien à ASan et UBSan, et au *fuzzing* de modèles de 
   `-machine q35,kernel-irqchip=split -device intel-iommu,intremap=on,aw-bits=48` côté hôte,
   `intel_iommu=on` côté invité — la propriété `aw-bits` existe bien dans QEMU 7.2.22, avec 39
   pour défaut. Ce qui reste ouvert est **empirique** : que les IOVA effectivement distribués
-  sous `dma_bits_override=64` dépassent 42 bits. À établir à l'étape 5, où `DBG_DMA_*` permet
-  de les provoquer sans monter virtio.
+  sous `dma_bits_override=64` dépassent 42 bits. **L'étape 5 ne l'a pas établi.** Le piège
+  lui-même est vérifié — la couche 1 du §13.1 le déclenche en écrivant l'IOVA à la main, et
+  le modèle rend bien `ERR_CODE = 4` — mais rien ne prouve encore qu'un vrai driver puisse
+  l'atteindre : `dma_bits_override` n'existe pas côté driver, et les adresses que produit
+  aujourd'hui le bloc `DBG_DMA_*` viennent toutes du pool cohérent, donc sont basses.
+  Reporté à l'étape 13, avec le paramètre de module du §9.1.
 - **Scatter-gather utilisateur réel** — la v1 s'en tient au tampon cohérent
   (`dma_alloc_coherent`) : une adresse DMA stable, pas de *pinning*. `VEL_F_SG` n'est donc
   pas réellement démontré tant que le chemin `pin_user_pages` + scatterlist + DMA *streaming*
@@ -1667,17 +1673,20 @@ Le modèle QEMU se prête bien à ASan et UBSan, et au *fuzzing* de modèles de 
 - **Allocateur device** — *bump allocator* par nœud pour commencer, `FREE` invalidant sans
   récupérer. Vrai allocateur seulement quand le besoin apparaît.
 - **`VIRTIO_ID_VELOCITOR`** — valeur provisoire, à confirmer contre la spec Virtio de la
-  version épinglée.
+  version épinglée. Matérialisée à l'étape 6 sous le nom `VEL_VIRTIO_ID` dans l'en-tête
+  partagé, et écrite telle quelle dans la table de ressources : la changer se fera d'un seul
+  endroit, mais ne dispense pas de la vérifier.
 - **SR-IOV** — extension possible, hors périmètre : répond à une question d'isolation entre
   locataires, pas de parallélisme.
 - **Désarmement des injections à usage unique** — les bits 0, 5 et 8 du §9 portent sur « la
   prochaine » opération. Le bit se désarme-t-il quand l'injection est consommée, ou reste-t-il
-  jusqu'à ce que le driver l'efface ? Le modèle de l'étape 3 ne fait ni l'un ni l'autre : il
-  mémorise ce qui a été écrit, ce qui rend `ERR_INJECT` relisible mais ambigu sur ces trois
-  bits — un `cat` montre ce qui a été armé, pas ce qui reste armé. Sans conséquence tant que
-  seul le bit 2, permanent par nature, est implémenté. **À trancher à l'étape 13**, quand les
-  injections concernées existeront ; le §12 item 6 exige de rendre compte du comportement sous
-  chacune, ce qui suppose de savoir laquelle est encore active.
+  jusqu'à ce que le driver l'efface ? L'étape 4 a tranché **pour le bit 6 seulement** : il est
+  consommé quand il agit, faute de quoi l'injection ne serait pas reproductible (§16). Les
+  trois autres restent ouverts, et le modèle se contente de mémoriser ce qui a été écrit —
+  `ERR_INJECT` est donc relisible mais ambigu sur eux : un `cat` montre ce qui a été armé, pas
+  ce qui reste armé. Sans conséquence tant que ces injections n'existent pas. **À trancher à
+  l'étape 13**, sur le précédent du bit 6 ; le §12 item 6 exige de rendre compte du
+  comportement sous chacune, ce qui suppose de savoir laquelle est encore active.
 
 Sont sortis des points ouverts en v0.6.3 : les identifiants PCI (§2.1, valeurs assignées) et
 le dimensionnement de `VEL_MEM_SIZE`, qui n'était une dette que par rapport à l'étape
@@ -1840,6 +1849,24 @@ le projet doit permettre de formuler.
 | étape 3 | `msix_init()` avec régions explicites, pas `msix_init_exclusive_bar()` | cette dernière code en dur `bar_size = 4096` et produirait une BAR4 de 4 Kio, alors que la taille est contractuelle au §3 |
 | étape 3 | `IRQ_MASK` supprime le message MSI-X mais **pas** le latch ; démasquer ne rejoue pas | le §4.1 donne le sens du bit (« 1 = masqué ») sans dire ce qu'il advient de `IRQ_STATUS`. Latcher quand même préserve le diagnostic — le driver voit ce qui s'est passé même s'il n'a pas été réveillé. Ne pas rejouer évite une file d'interruptions différées dont le §3.3 n'a aucun besoin : les deux seuls vecteurs concernés sont la configuration et l'erreur |
 | étape 3 | `ERR_INJECT` bit 2 câblé à l'étape 3, avant le bloc d'erreur qualifiée du §4.4 | le critère de l'étape 3 est « interruption **reçue et acquittée** ». Sans un moyen de lever un vecteur, aucun bit ne peut jamais entrer dans `IRQ_STATUS`, donc `IRQ_ACK` reste du code non exercé et l'étape n'est pas falsifiable. Le bit 2 du §9 est le déclencheur le moins cher que le contrat définisse déjà, et il resservira à l'item 6 du §12. Conséquence assumée : le vecteur 5 est levé **sans être qualifié** — pas d'`ERR_CODE = 10` tant que le §4.4 n'existe pas |
+| étape 4 | BAR2 en alias de `MemoryRegion`, pas en callbacks d'I/O | des callbacks feraient une sortie de VM par accès de quatre octets, et le critère de l'étape 4 est un balayage des 256 Mo : 64 millions de sorties, ce qui n'est pas un test qu'on lance deux fois. En alias, les deux moitiés tournent à la vitesse de la RAM et le seul MMIO restant sur le chemin est `WIN_BASE` lui-même — ce qui est précisément le registre qu'on veut observer |
+| étape 4 | Mémoire locale remplie au reset : chaque mot de 32 bits contient son propre offset | artefact de modèle assumé — le §2 ne dit rien du contenu à l'allumage. C'est ce qui rend le balayage falsifiable : le driver ne peut pas fabriquer cet oracle, puisque écrire un motif à travers la même arithmétique fausse qu'il relira ensuite annulerait les deux erreurs. Un vrai device n'offre **rien de tel** : la mémoire y est indéterminée, et le *bring-up* réel se contente d'un aller-retour. À ne pas prendre pour une pratique transposable |
+| étape 4 | `CNT_WIN_MOVE` compte les déplacements effectifs, pas les écritures de `WIN_BASE` | compter les écritures mettrait le compteur d'accord avec un driver qui ne relit jamais — or tout l'intérêt du §9 est que les deux doivent diverger |
+| étape 4 | Une écriture de `WIN_BASE` non alignée ou hors plage est ignorée et comptée dans `CNT_ERR_RANGE` | le §3.1 donne les bornes sans dire ce qu'il advient d'une écriture qui les viole. L'ignorer en silence serait indétectable ; lever une erreur qualifiée pour une écriture de configuration serait disproportionné. Le compteur laisse une trace sans rien interrompre |
+| étape 4 | Le bit 6 d'`ERR_INJECT` est consommé lorsqu'il agit | le §9 dit « la prochaine écriture ». Le désarmer est la seule lecture qui rende l'injection reproductible : un driver qui compare sa relecture se rétablit à l'essai suivant, un qui ne compare pas reste faux pour de bon. Tranche le point ouvert du §14 pour le bit 6 seulement — les bits 0, 5 et 8 restent à décider avec les injections correspondantes |
+| étape 5 | DMA de *bring-up* exécuté depuis un timer sur `QEMU_CLOCK_VIRTUAL`, pas depuis un *bottom half*, et `DBG_DMA_STATUS` passe par `BUSY` | l'annexe D.1 interdit de calculer dans le callback MMIO sans dire par quoi le remplacer. Un *bottom half* ne tourne pas sous `-accel qtest`, où il n'y a pas de CPU : la couche 1 du §13.1 ne verrait jamais un transfert se terminer. Le timer virtuel est déterministe — ce que le §9 exige partout ailleurs — et pilotable par `clock_step`. Copier en ligne rendrait par ailleurs l'état occupé inobservable, et l'étape 5 réussirait avec un driver qui ne scrute rien |
+| étape 5 | Un échec de `pci_dma_read`/`write` est rapporté comme `ERR_CODE = 4` | le §4.4 n'a pas de code pour « le bus a refusé ». La largeur d'adresse est de très loin la cause la plus probable ici, et c'est celle que le §9.1 cherche à produire. Approximation assumée, à revoir si un autre mode d'échec apparaît |
+| étape 6 | Firmware généré octet par octet par `firmware/mkfw.c`, `EM_NONE`, sans code exécutable | le §6.6 exige un ELF que le core parse réellement, pas un exécutable : le modèle joue le rôle du processeur, et l'image ne prétend donc pas viser une architecture. Un *toolchain* croisé pour un processeur qui n'existe pas serait beaucoup de machinerie pour moins de contrôle ; le générateur partage `velocitor_hw.h` avec le modèle et le driver, donc ne peut pas diverger d'eux |
+| étape 6 | En-tête firmware et en-tête d'anneau de trace exprimés en offsets dans l'en-tête partagé, pas en `struct` | `velocitor_hw.h` ne dépend d'aucun autre en-tête et n'a donc aucun type de largeur fixe pour déclarer des champs. Les trois consommateurs ont les leurs ; le §6.6 garde la forme `struct` comme documentation |
+| étape 6 | La position de l'anneau de trace est choisie par le générateur (64 Kio) et publiée par l'en-tête, pas figée par une constante partagée | c'est exactement ce à quoi sert le champ `trace_da` du §6.6 ; une constante partagée le viderait de son sens. Le modèle vérifie en revanche que l'anneau tient entièrement dans l'aperture fixe, faute de quoi le driver ne pourrait pas le lire (§6.2) |
+| étape 6 | Le `PT_LOAD` déclare un `p_memsz` qui couvre l'anneau de trace | `rproc_elf_load_segments` fait alors le `memset_io()` de la zone, donc `head`, `tail` et `dropped` valent zéro sans que le firmware ait à livrer un anneau prérempli — ce qui serait un mensonge sur ce qu'il a écrit. Seul `entry_size` est posé, par le modèle, au démarrage |
+| étape 6 | À la montée de `RSC_VALID`, le modèle ne vérifie que `ver` et `num` | parser les entrées appartient à l'étape qui les consomme, et redoubler la validation du core ne créerait qu'un second avis susceptible de le contredire. Ces deux mots suffisent à attraper un driver qui publie le mauvais tampon, ou le bon à la mauvaise adresse |
+| étape 6 | `RSC_VALID` relit ce que le device a **accepté**, pas ce qui a été écrit | sans quoi un driver dont la table est illisible croirait l'avoir publiée, et ne le découvrirait qu'à l'étape 7, sur un `notifyid` aberrant |
+| étape 6 | Le piège des 42 bits s'applique aussi au chemin de contrôle | il serait absurde qu'une table publiée hors de portée du device soit acceptée alors qu'un transfert de données à la même adresse est refusé : c'est le même défaut de masque, au même endroit |
+| étape 6 | `RESET` relâchée sans table fantôme valide : journalisée, pas refusée | le §6.1 fixe l'ordre — publier, puis relâcher — mais le démarrage lui-même n'a pas besoin de la table. La refuser inventerait une dépendance que le contrat ne crée pas ; la taire laisserait passer un bug qui n'éclaterait qu'à l'étape 7 |
+| étape 6 | `RESET` vaut 1 au démarrage ; `GENERATION` part de 0 et la première réussite la porte à 1 | rien n'est chargé, donc annoncer autre chose serait un mensonge sur lequel le driver pourrait agir. Et « aucun firmware n'a jamais tourné ici » se distingue ainsi de « un seul l'a fait » (§6.5) |
+| étape 6 | Relâcher `RESET` repart toujours de `FW_STATUS = 0`, y compris en sortie de `CRASHED` | le §4.1 dit qu'un en-tête invalide laisse `FW_STATUS` à 0 ; cela doit valoir en sortie de plantage comme à froid, sinon la reprise du §6.5 hérite du statut de la génération précédente |
+| étape 6 | Le passage `FW_STATUS` `1 → 2` est différé par un timer virtuel, comme le DMA | sans délai, l'attente de `FW_STATUS == 2` dans `ops->start()` serait une formalité qui n'attend rien, et un driver qui ne scruterait pas passerait tout de même |
 
 ### Décisions écartées, et pourquoi
 

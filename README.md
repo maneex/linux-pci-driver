@@ -16,6 +16,7 @@ spec.
 |---|---|---|
 | `qemu-device/` | le modèle QEMU : périphérique, firmware simulé, moteurs, compteurs | intervenant « modèle » (§0.6) |
 | `module/` | `velocitor_pci` : driver noyau, remoteproc, rpmsg, virtio, UAPI | intervenant « driver » (§0.6) |
+| `firmware/` | l'image que remoteproc charge : en-tête du §6.6 et table de ressources du §6.3, générées — aucun code exécutable | intervenant « modèle » (§0.6) |
 | `devtools/` | environnement de compilation et d'exécution en VM | commun |
 | `vm/` | images de VM (hors dépôt) | — |
 
@@ -41,8 +42,13 @@ devtools/setup.sh          # noyau invité 6.18.44 + busybox + initramfs (~15 mi
 devtools/build-qemu.sh     # QEMU 7.2.22 avec le device velocitor (~10 min)
 devtools/qtest-probe.sh    # vérifie le modèle seul, sans invité (2 s)
 devtools/build-module.sh   # module/ contre le noyau invité
+devtools/build-firmware.sh # l'image remoteproc, avec le compilateur de l'hôte
 devtools/boot.sh           # démarre la VM, device attaché
 ```
+
+Le firmware est un artefact de construction, pas un fichier versionné.
+`init` le relie dans `/lib/firmware` de l'invité depuis le partage 9p, donc le
+reconstruire suffit — pas besoin de refaire l'initramfs.
 
 Les scripts sont idempotents : relancer ne refait que ce qui a changé.
 Éditer `qemu-device/velocitor.c` puis relancer `build-qemu.sh` ne relance que
@@ -159,7 +165,7 @@ il ne dépend d'aucun en-tête QEMU, noyau ou libc, précisément pour pouvoir
 
 ### Ce qui est implémenté aujourd'hui
 
-Les étapes 2 et 3 du §13, des deux côtés :
+Les étapes 2 à 5 du §13 des deux côtés, et l'étape 6 côté modèle :
 
 - identité PCI et disposition des capacités (§2.1, §3) ;
 - les trois BAR, avec type et taille contractuels ;
@@ -169,17 +175,26 @@ Les étapes 2 et 3 du §13, des deux côtés :
   répondent depuis l'instantané, jamais depuis les valeurs vives ;
 - MSI-X sur BAR4, six vecteurs, plus `IRQ_STATUS` / `IRQ_MASK` / `IRQ_ACK`
   (§3.3, §4.1) — seuls les vecteurs 0 et 5 latchent ;
-- `ERR_INJECT` bit 2 (§9), le déclencheur qui rend l'étape 3 falsifiable :
-  `FW_STATUS = 3` et vecteur 5 ;
+- le contenu de BAR2 (§3.1) : aperture fixe et fenêtre glissante, en alias de
+  `MemoryRegion` pour que le balayage tourne à la vitesse de la RAM, avec la
+  relecture obligatoire de `WIN_BASE` du §9 ;
+- le bloc `DBG_DMA_*` (§4.3), asynchrone sur un timer d'horloge virtuelle, avec
+  le piège des 42 bits de l'annexe D.2 ;
+- les registres de table fantôme (§4.2) et le contrôle que le modèle fait de la
+  table quand `RSC_VALID` monte (§6.4) ;
+- le cycle de vie du firmware (§4.1, §6.1, §6.5, §6.6) : `RESET`, vérification
+  de l'en-tête chargé, `FW_STATUS` par 1 puis 2, `FW_ABI`, `GENERATION` ;
+- `ERR_INJECT` bits 2 et 6 (§9) : le plantage firmware, et l'écriture de
+  `WIN_BASE` avalée en silence ;
 - les règles d'accès du §4 : 32 bits alignés uniquement, sinon `0xFFFFFFFF` en
   lecture et écriture ignorée ; offset non implémenté → lecture 0 ; et les
   registres WO du §A.3 rendent `0xFFFFFFFF` quand on les lit.
 
 Tout le reste de BAR0 répond comme réservé et journalise sous `LOG_UNIMP` en
-nommant la section de spec qui l'implémentera. BAR2 est déclarée mais vide.
-Rien ne démarre de firmware ni ne déplace de données ; l'erreur levée par
-l'injection n'est pas encore *qualifiée*, le bloc `ERR_CODE` du §4.4 n'existant
-pas.
+nommant la section de spec qui l'implémentera. Du bloc d'erreur qualifiée du
+§4.4, seuls `ERR_CODE` et `ERR_INFO_*` existent, remplis par le DMA, la table
+fantôme et la vérification de l'en-tête firmware. Aucune queue n'est
+programmable et rien ne consomme d'anneau.
 
 Pour voir ces journaux :
 
@@ -198,18 +213,22 @@ C'est la **couche 1 du §13.1** — le device QEMU sans Linux. L'accélérateur
 script programme les BAR à la main par les ports de configuration
 `0xcf8`/`0xcfc`, relit les registres et compare à des valeurs attendues.
 
-Ce qu'il couvre aujourd'hui : `MAGIC`, `VERSION`, `CAPS`, `MEM_SIZE`,
-`TOPOLOGY`, `DMA_BITS`, la relecture inversée de `SCRATCH`, les quatre règles
-d'accès du §4 (1 octet, 8 octets, non aligné, offset réservé), le rejet d'une
-écriture sur registre en lecture seule, la BAR2 stub, le bloc de compteurs et
-ses deux registres en écriture seule, la capacité MSI-X et ses deux champs BIR
-lus en espace de configuration, et le cycle complet de l'étape 3 — injection,
-`FW_STATUS = 3`, latch du vecteur 5, `IRQ_ACK`, retour à zéro. 36 cas.
+Ce qu'il couvre aujourd'hui, en 96 cas : le bloc d'identité, la relecture
+inversée de `SCRATCH`, les quatre règles d'accès du §4 (1 octet, 8 octets, non
+aligné, offset réservé), le rejet d'une écriture sur registre en lecture seule,
+le bloc de compteurs et ses deux registres en écriture seule, la capacité MSI-X
+et ses deux champs BIR lus en espace de configuration, le cycle de l'étape 3 —
+injection, `FW_STATUS = 3`, latch du vecteur 5, `IRQ_ACK`, retour à zéro — la
+fenêtre glissante avec sa relecture obligatoire et ses deux rejets, un
+aller-retour DMA complet avec le piège des 42 bits, la table fantôme et ses
+refus, et le cycle de vie du firmware jusqu'à `GENERATION`.
 
-Le dernier de ces cas est le seul test réel de l'instantané du §4.5 :
-`CNT_NOTIFY_TX` lit `0` avant `CNT_SNAP` et `1` après, sur le même
-compteur vif. Tant que rien ne s'incrémentait, le mécanisme n'était pas
-falsifiable.
+Deux de ces cas ne se remarquent pas et portent pourtant l'essentiel.
+`CNT_NOTIFY_TX` lit `0` avant `CNT_SNAP` et `1` après, sur le même compteur
+vif : tant que rien ne s'incrémentait, l'instantané du §4.5 n'était pas
+falsifiable. Et une `RESET` relâchée sans firmware chargé laisse `FW_STATUS` à
+zéro avec `ERR_CODE = 10` : c'est ce qui interdit à un `load` faux de démarrer
+quand même.
 
 L'énumération elle-même — `1b36:0100`, classe `0x1200`, BAR0 4 Ko
 non-prefetchable, BAR2 32 Mo 64 bits prefetchable, BAR4 8 Ko, aucun pin
@@ -243,23 +262,39 @@ Et `cma: Reserved 128 MiB` dans `dmesg`, le préalable du §2.
 Le module *bind* désormais, et ses six vecteurs MSI-X apparaissent dans
 `/proc/interrupts` de l'invité.
 
+La **couche 2 du §13.1** a son propre script, qui tourne dans l'invité :
+
+```sh
+devtools/boot.sh --test /mnt/velocitor/devtools/guest-dma-test.sh
+```
+
+Il vérifie le pool cohérent seul, un D2H contre le motif de reset — le seul
+oracle que le driver ne puisse pas fabriquer — l'aller-retour H2D/D2H, les
+bornes de chaque côté, et le contrôle croisé entre la fenêtre glissante et le
+DMA : deux chemins d'adressage disjoints vers les mêmes octets, de sorte
+qu'une erreur d'arithmétique dans l'un ne puisse pas se compenser dans
+l'autre. Il finit par une passe de *fuzzing* dont `SEED` et `FUZZ` sont des
+variables d'environnement, et un `grep` de `dmesg` — un test qui ne lit que
+ses propres codes de retour passerait à travers un *splat*.
+
 ### Ce qui ne l'est pas
 
 Par étape du §13, dans l'ordre des dépendances :
 
 | Étape | Manque côté modèle |
 |---|---|
-| 4 | contenu de BAR2 : aperture fixe, fenêtre glissante, `WIN_BASE` et son *read-back* (§3.1, §9) |
-| 5 | `DBG_DMA_*` et le bus-mastering (§4.3, annexe D.1/D.2) |
-| 6 | `RESET`, `FW_STATUS`, `GENERATION`, en-tête firmware, anneau de trace, table fantôme (§4.2, §6) |
-| 7 | endpoint rpmsg et annonce *name service* (§7.1, annexe D.5) |
+| 6 | `DOORBELL`, écriture d'entrées dans l'anneau de trace, lecture des `notifyid` dans la table fantôme (§4.1, §6.4, §6.6) |
+| 7 | fenêtre `VQ_*` (§4.2), endpoint rpmsg et annonce *name service* (§7.1, annexe D.5) |
 | 8 | consommation des *split rings*, moteurs GEMM (§8) |
-| 9 | erreur qualifiée (§4.4) et `ERR_INJECT` (§9) |
+| 9 | le reste de l'erreur qualifiée (§4.4 au-delà d'`ERR_CODE`/`ERR_INFO_*`) et les huit autres bits d'`ERR_INJECT` (§9) |
+
+Les étapes 4 et 5 sont faites côté modèle, et l'étape 6 l'est pour tout ce dont
+le driver a besoin pour démarrer un firmware.
 
 ## Divergences et décisions à valider
 
 Deux points sur lesquels le code prend position ; les noter au §16 quand ils
-sont tranchés. Les décisions déjà tranchées pendant les étapes 2 et 3 y sont
+sont tranchés. Les décisions déjà tranchées pendant les étapes 2 à 6 y sont
 consignées.
 
 1. **`VERSION` n'est pas fixé par la spec.** Le modèle rend `0.6`
@@ -305,9 +340,11 @@ Le livre lkmpg est sous OSL-3.0 ; son code d'exemple est sous GPL-2. Voir
 | `devtools/build-module.sh` | `devtools/build-modules.sh` | cible `module/` au lieu de `examples/` |
 | `devtools/config.defaults` | `devtools/config.defaults` | versions épinglées du §C.4, variables de construction QEMU, réglages invité |
 | `devtools/kernel.config` | `devtools/kernel.config` | options des exemples lkmpg retirées ; PCIe, CMA, IOMMU, remoteproc/rpmsg, ftrace ajoutés |
-| `devtools/initramfs/init` | `devtools/initramfs/init` | renommages, bannière |
+| `devtools/initramfs/init` | `devtools/initramfs/init` | renommages, bannière, montage de tracefs, lien du firmware dans `/lib/firmware` |
 | `devtools/build-qemu.sh` | — | nouveau : pas d'équivalent en amont, lkmpg utilise le QEMU du système |
 | `devtools/qtest-probe.sh` | — | nouveau : lkmpg n'a pas de device à tester |
+| `devtools/build-firmware.sh` | — | nouveau : lkmpg n'a pas de firmware à produire |
+| `devtools/guest-dma-test.sh` | — | nouveau : couche 2 du §13.1, tourne dans l'invité |
 
 Non repris : `check.sh`, `test-modules.sh`, `guest-test.sh`,
 `pack-prebuilt.sh` et les scripts `.ci/`. Ils portent la CI du guide et ses
