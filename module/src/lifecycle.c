@@ -64,10 +64,10 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
 
   // Check MAGIC
   u32 magic = readl(device->bar0 + VEL_REG_MAGIC);
-  if (VEL_FW_MAGIC != magic) {
+  if (VEL_MAGIC != magic) {
     dev_err(&dev->dev,
             "velocitor.bar0: invalid magic: got 0x%08x, expected 0x%08x\n",
-            magic, VEL_FW_MAGIC);
+            magic, VEL_MAGIC);
     return -ENODEV;
   }
   dev_info(&dev->dev, "bar0: magic verified");
