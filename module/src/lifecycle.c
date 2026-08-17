@@ -16,49 +16,9 @@ MODULE_DEVICE_TABLE(pci, pci_id_table);
 
 // https : // www.kernel.org/doc/html/v6.0/PCI/pci.html
 
-static int velocitor_release(struct pci_dev *dev,
-                             enum InitialisationState state, int ret) {
-  struct Device *device = pci_get_drvdata(dev);
-
-  // Release the IRQ (free_irq())
-  // Stop all DMA activity
-  // Release DMA buffers (both streaming and coherent)
-  // Unregister from other subsystems (e.g. scsi or netdev)
-
-  switch (state) {
-  case INIT_STATE_COMPLETE:
-    fallthrough;
-
-  case INIT_STATE_IRQ:
-    pci_free_irq_vectors(dev);
-    fallthrough;
-
-  case INIT_STATE_DMA:
-    pci_clear_master(dev);
-    fallthrough;
-
-  case INIT_STATE_IOMAP: // Release MMIO/IOP resources
-    if (NULL != device->bar0)
-      pci_iounmap(dev, device->bar0);
-    if (NULL != device->bar2)
-      pci_iounmap(dev, device->bar2);
-    pci_release_regions(dev);
-    fallthrough;
-
-  case INIT_STATE_ENABLED:
-    pci_disable_device(dev);
-    fallthrough;
-
-  case INIT_STATE_PROBED:
-    break;
-  }
-
-  return ret;
-}
-
 static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
   // Get mapping
-  device->bar0 = pci_iomap(dev, 0, 0);
+  device->bar0 = pcim_iomap_region(dev, 0, KBUILD_MODNAME);
   if (NULL == device->bar0)
     return -ENOMEM;
 
@@ -93,7 +53,7 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
 }
 
 static int initialize_bar2(struct pci_dev *dev, struct Device *device) {
-  device->bar2 = pci_iomap(dev, 2, 0);
+  device->bar2 = pcim_iomap_region(dev, 2, KBUILD_MODNAME);
   if (NULL == device->bar2)
     return -ENOMEM;
 
@@ -109,11 +69,16 @@ static int initialize_dma_engine(struct pci_dev *dev, struct Device *device) {
   return 0;
 }
 
+static void velocitor_irq_release(void *data) { pci_free_irq_vectors(data); }
+
 // https://docs.kernel.org/PCI/msi-howto.html
 // https://kernel-internals.org/interrupts/threaded-irq/
 static int initialize_irq_handlers(struct pci_dev *dev, struct Device *device) {
   int err = 0;
   if ((err = pci_alloc_irq_vectors(dev, 6, 6, PCI_IRQ_MSIX)) < 0)
+    return err;
+
+  if ((err = devm_add_action_or_reset(&dev->dev, velocitor_irq_release, dev)))
     return err;
 
   // FIXME! IRQ handler affinity ?
@@ -151,29 +116,25 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   dev_info(&dev->dev, "probe: device found");
 
   //  Enable the device
-  if ((err = pci_enable_device(dev)))
-    return velocitor_release(dev, INIT_STATE_PROBED, err);
+  if ((err = pcim_enable_device(dev)))
+    return err;
   dev_info(&dev->dev, "probe: device enabled");
 
   // Request MMIO/IOP resources
-  if ((err = pci_request_regions(dev, KBUILD_MODNAME)))
-    return velocitor_release(dev, INIT_STATE_ENABLED, err);
-  dev_info(&dev->dev, "probe: request regions as %s", KBUILD_MODNAME);
-
   if ((err = initialize_bar0(dev, device)))
-    return velocitor_release(dev, INIT_STATE_IOMAP, err);
+    return err;
   if ((err = initialize_bar2(dev, device)))
-    return velocitor_release(dev, INIT_STATE_IOMAP, err);
+    return err;
 
   // Set the DMA mask size (for both coherent and streaming DMA)
   // Allocate and initialize shared control data (pci_allocate_coherent())
   if ((err = initialize_dma_engine(dev, device)))
-    return velocitor_release(dev, INIT_STATE_DMA, err);
+    return err;
 
   // Access device configuration space (if needed)
   // Register IRQ handler (request_irq())
   if ((err = initialize_irq_handlers(dev, device)))
-    return velocitor_release(dev, INIT_STATE_DMA, err);
+    return err;
 
   // Initialize non-PCI (i.e. LAN/SCSI/etc parts of the chip)
   // Enable DMA/processing engines
@@ -183,9 +144,7 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   return 0;
 }
 
-static void velocitor_pci_remove(struct pci_dev *dev) {
-  velocitor_release(dev, INIT_STATE_COMPLETE, 0);
-}
+static void velocitor_pci_remove(struct pci_dev *dev) {}
 
 static struct pci_driver velocitor_pci_driver = {
     .name = "velocitor",
