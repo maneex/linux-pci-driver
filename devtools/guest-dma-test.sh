@@ -46,6 +46,7 @@ for d in /sys/kernel/debug/velocitor/*/; do
 done
 [ -n "$DBG" ] || die "no velocitor debugfs directory -- did probe fail?"
 [ -e "$DBG/dma_ctrl" ] || die "$DBG/dma_ctrl missing"
+[ -e "$DBG/mem" ] || die "$DBG/mem missing"
 
 # The tracepoint is the only place the device-side error code surfaces, so a
 # failing run leaves something to read.
@@ -121,7 +122,55 @@ else
     fail "round trip transfer was refused"
 fi
 
-# ------------------------------------------------- 4. device-side bound ----
+# -------------------------------------------------------- 4. the window ----
+#
+# Same bytes, two completely disjoint addressing paths: the sliding window of
+# section 3.1, where the CPU reads through BAR2, against a DMA the device
+# performs itself.  An arithmetic error in one cannot be cancelled by the
+# same error in the other, which is what a plain write-then-read-back round
+# trip cannot tell you.
+
+# First against the pattern block 3 just pushed, low enough to sit in the
+# window at base 0.
+dd if="$DBG/mem" of=/tmp/win-near bs=4096 skip=$((0x100000 / 4096)) count=1 2>/dev/null
+if cmp -s /tmp/pattern /tmp/win-near; then
+    pass "window read at 0x100000 matches what H2D put there"
+else
+    fail "window and DMA disagree at 0x100000"
+fi
+
+# Then far out, where reaching the bytes at all means the window has to move.
+BEFORE=$(counter win_move)
+dd if="$DBG/mem" of=/tmp/win-far bs=4096 skip=$((0x8000000 / 4096)) count=1 2>/dev/null
+AFTER=$(counter win_move)
+
+if [ "$AFTER" -gt "$BEFORE" ]; then
+    pass "reading at 0x8000000 moved the window, win_move $BEFORE -> $AFTER"
+else
+    fail "window did not move for an offset outside it ($BEFORE)"
+fi
+
+if dma d2h 0x8000000 0x20000 4096; then
+    pool_save 32 1 /tmp/dma-far
+    if cmp -s /tmp/win-far /tmp/dma-far; then
+        pass "window and D2H agree on 4096 bytes at 0x8000000"
+    else
+        fail "window and D2H disagree at 0x8000000"
+    fi
+else
+    fail "D2H at 0x8000000 was refused"
+fi
+
+# Nothing has been written that far out, so the reset pattern still holds and
+# the first word says which offset the window actually landed on.
+W0=$(od -An -tx4 -N4 /tmp/win-far | awk '{ print $1 }')
+if [ "$W0" = "08000000" ]; then
+    pass "window landed on the right base (first word $W0)"
+else
+    fail "window returned $W0 at 0x8000000, expected 08000000"
+fi
+
+# ------------------------------------------------- 5. device-side bound ----
 #
 # The driver passes the device offset through untouched, so this must be
 # refused by the device and counted as a range error (section 4.5).
@@ -138,7 +187,7 @@ else
     fi
 fi
 
-# --------------------------------------------------- 5. driver-side bound ----
+# --------------------------------------------------- 6. driver-side bound ----
 #
 # The pool bound is the one check the driver owes: the device can reach
 # nothing else.  It must be caught before any register is written, so no
@@ -153,7 +202,7 @@ else
     fail "pool overrun reached the device"
 fi
 
-# ---------------------------------------------------------- 6. fuzzing ----
+# ---------------------------------------------------------- 7. fuzzing ----
 #
 # Random parameters, with one in five deliberately out of range.  The rule
 # being checked is not that a given transfer succeeds, but that the verdict
@@ -204,7 +253,7 @@ if [ "$FUZZ" -gt 0 ]; then
     fi
 fi
 
-# ------------------------------------------------------- 7. the kernel ----
+# ------------------------------------------------------- 8. the kernel ----
 #
 # A test that only reads its own return codes would miss a splat entirely.
 
