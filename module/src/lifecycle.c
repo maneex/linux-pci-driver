@@ -75,7 +75,8 @@ static void velocitor_irq_release(void *data) { pci_free_irq_vectors(data); }
 // https://kernel-internals.org/interrupts/threaded-irq/
 static int initialize_irq_handlers(struct pci_dev *dev, struct Device *device) {
   int err = 0;
-  if ((err = pci_alloc_irq_vectors(dev, 6, 6, PCI_IRQ_MSIX)) < 0)
+  if ((err = pci_alloc_irq_vectors(dev, VEL_MSIX_VECTORS, VEL_MSIX_VECTORS,
+                                   PCI_IRQ_MSIX)) < 0)
     return err;
 
   if ((err = devm_add_action_or_reset(&dev->dev, velocitor_irq_release, dev)))
