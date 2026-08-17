@@ -113,7 +113,7 @@ static int initialize_dma_engine(struct pci_dev *dev, struct Device *device) {
 // https://kernel-internals.org/interrupts/threaded-irq/
 static int initialize_irq_handlers(struct pci_dev *dev, struct Device *device) {
   int err = 0;
-  if ((6 != pci_alloc_irq_vectors(dev, 6, 6, PCI_IRQ_MSIX)))
+  if ((err = pci_alloc_irq_vectors(dev, 6, 6, PCI_IRQ_MSIX)) < 0)
     return err;
 
   // FIXME! IRQ handler affinity ?
