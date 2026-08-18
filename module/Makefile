@@ -6,8 +6,11 @@ velocitor-y += src/counters.o
 velocitor-y += src/window.o
 velocitor-y += src/identity.o
 velocitor-y += src/dma.o
+velocitor-y += src/remoteproc.o
 
 ccflags-y += -I$(src)/include -I$(src)/../qemu-device/ -I$(src)/src
+# rproc_elf_* are exported but declared in the remoteproc core's private header.
+ccflags-y += -I$(srctree)/drivers/remoteproc
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(CURDIR)

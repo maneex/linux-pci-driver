@@ -16,6 +16,16 @@ TRACE_EVENT(velocitor_irq, TP_PROTO(unsigned int vector), TP_ARGS(vector),
             TP_fast_assign(__entry->vector = vector;),
             TP_printk("vector=%u", __entry->vector));
 
+TRACE_EVENT(velocitor_irq_cfg, TP_PROTO(unsigned int status), TP_ARGS(status),
+            TP_STRUCT__entry(__field(unsigned int, status)),
+            TP_fast_assign(__entry->status = status;),
+            TP_printk("firwmare status=%s",
+                      __print_symbolic(__entry->status,
+                                       {VEL_FW_STATUS_RESET, "reset"},
+                                       {VEL_FW_STATUS_VERIFIED, "verified"},
+                                       {VEL_FW_STATUS_RUNNING, "running"},
+                                       {VEL_FW_STATUS_CRASHED, "crashed"})));
+
 TRACE_EVENT(velocitor_winmove, TP_PROTO(u32 from, u32 to, void *caller),
             TP_ARGS(from, to, caller),
             TP_STRUCT__entry(__field(u32, from) __field(u32, to)

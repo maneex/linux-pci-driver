@@ -13,16 +13,6 @@
 
 // https:/www.kernel.org/doc/html/v6.8/core-api/dma-api-howto.html
 
-static void velocitor_dma_release(void *data) {
-  struct pci_dev *dev = data;
-  struct velocitor_dev *device = pci_get_drvdata(dev);
-
-  dma_free_coherent(&dev->dev, VEL_HOST_POOL_SIZE, device->dma.cpu_addr,
-                    device->dma.handle);
-  device->dma.cpu_addr = NULL;
-  device->dma.handle = 0;
-}
-
 //-EIO, -EDTIMEOUT
 static int velocitor_dma_dbg_(struct pci_dev *dev, u32 dir, u32 offset,
                               u32 pool_offset, u32 len, u32 *err_code) {
@@ -140,7 +130,6 @@ static const struct file_operations velocitor_dma_debugfs_ctrl_fops = {
 int velocitor_dma_initialize(struct pci_dev *dev) {
   int err = 0;
   struct velocitor_dev *device = pci_get_drvdata(dev);
-
   if ((err = devm_mutex_init(&dev->dev, &device->dma.dbg_lock)))
     return err;
 
@@ -149,13 +138,10 @@ int velocitor_dma_initialize(struct pci_dev *dev) {
     return err;
   dev_info(&dev->dev, "dma: width %d bits", VEL_DMA_BITS);
 
-  device->dma.cpu_addr = dma_alloc_coherent(&dev->dev, VEL_HOST_POOL_SIZE,
-                                            &device->dma.handle, GFP_KERNEL);
+  device->dma.cpu_addr = dmam_alloc_coherent(&dev->dev, VEL_HOST_POOL_SIZE,
+                                             &device->dma.handle, GFP_KERNEL);
   if (NULL == device->dma.cpu_addr)
     return -ENOMEM;
-
-  if ((err = devm_add_action_or_reset(&dev->dev, velocitor_dma_release, dev)))
-    return err;
 
   debugfs_create_file_size("dma_pool", 0600, device->debugfs, dev,
                            &velocitor_dma_debugfs_pool_fops,

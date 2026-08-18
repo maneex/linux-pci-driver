@@ -7,6 +7,11 @@
 #include <linux/dma-mapping.h>
 #include <linux/mutex.h>
 
+struct velocitor_dma_buf {
+  void *cpu;
+  dma_addr_t dma;
+};
+
 struct velocitor_dev {
   void __iomem *bar0;
   void __iomem *bar2;
@@ -34,6 +39,12 @@ struct velocitor_dev {
     size_t base;
     struct mutex lock;
   } window;
+
+  struct {
+    struct rproc *handle;
+    struct velocitor_dma_buf rsc;
+    struct velocitor_dma_buf vrings[4];
+  } rproc;
 };
 
 #endif // not VELOCITOR_DEVICE_H

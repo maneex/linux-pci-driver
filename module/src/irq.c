@@ -16,8 +16,13 @@
 
 static void velocitor_irq_release(void *data) { pci_free_irq_vectors(data); }
 
-static irqreturn_t irq_config_event(int irq, void *dev) {
-  trace_velocitor_irq(0);
+static irqreturn_t irq_config_event(int irq, void *data) {
+  struct pci_dev *dev = data;
+  const struct velocitor_dev *device = pci_get_drvdata(dev);
+
+  u32 status = readl(device->bar0 + VEL_REG_FW_STATUS);
+  writel(BIT(VEL_IRQ_VEC_CONFIG), device->bar0 + VEL_REG_IRQ_ACK);
+  trace_velocitor_irq_cfg(status);
   return IRQ_HANDLED;
 }
 
@@ -43,7 +48,7 @@ static irqreturn_t irq_queue3_event(int irq, void *dev) {
 
 static irqreturn_t irq_error_event(int irq, void *data) {
   struct pci_dev *dev = data;
-  struct velocitor_dev *device = pci_get_drvdata(dev);
+  const struct velocitor_dev *device = pci_get_drvdata(dev);
 
   trace_velocitor_irq(5);
   // FIXME ! Do something :)

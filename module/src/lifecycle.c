@@ -15,6 +15,7 @@
 #include "dma.h"
 #include "identity.h"
 #include "irq.h"
+#include "remoteproc.h"
 #include "window.h"
 
 static const struct pci_device_id pci_id_table[] = {
@@ -116,6 +117,10 @@ static int velocitor_pci_probe(struct pci_dev *dev,
 
   // Initialize non-PCI (i.e. LAN/SCSI/etc parts of the chip)
   // Enable DMA/processing engines
+
+  //
+  if ((err == velocitor_remoteproc_initialize(dev)))
+    return err;
 
   dev_info(&dev->dev, "probe: initialisation complete");
 
