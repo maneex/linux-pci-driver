@@ -119,7 +119,7 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   // Enable DMA/processing engines
 
   //
-  if ((err == velocitor_remoteproc_initialize(dev)))
+  if ((err = velocitor_remoteproc_initialize(dev)))
     return err;
 
   dev_info(&dev->dev, "probe: initialisation complete");
