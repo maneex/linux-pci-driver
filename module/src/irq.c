@@ -1,5 +1,6 @@
 // Linux headers.
 #include <linux/pci.h>
+#include <linux/remoteproc.h>
 
 // Velotcitor headers.
 #include <velocitor_hw.h>
@@ -9,9 +10,6 @@
 #include "error.h"
 #include "irq.h"
 
-// This is the one translation unit that emits the tracepoint symbols, so the
-// macro goes *before* the include -- define_trace.h tests it as it is read.
-// Any other file wanting trace_velocitor_irq() includes trace.h without it.
 #define CREATE_TRACE_POINTS
 #include "trace.h"
 
@@ -54,10 +52,11 @@ static irqreturn_t irq_error_event(int irq, void *data) {
   struct velocitor_error error = {};
   velocitor_error_read(device, &error);
 
-  // Unlatch interrupt.
+  // Unlatch interrupt, trace and report.
   writel(BIT(VEL_IRQ_VEC_ERROR), device->bar0 + VEL_REG_IRQ_ACK);
-
   trace_velocitor_error(&error);
+  if (NULL != device->rproc.handle)
+    rproc_report_crash(device->rproc.handle, RPROC_FATAL_ERROR);
   return IRQ_HANDLED;
 }
 
