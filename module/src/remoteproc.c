@@ -41,6 +41,28 @@ static int velocitor_rproc_prepare(struct rproc *rproc) {
   return 0;
 }
 
+static void velocitor_rproc_vring_initialize(const struct velocitor_dev *device,
+                                             u32 idx) {
+  struct vring vr;
+  vring_init(&vr, VEL_VRING_NUM, device->rproc.vrings[idx].cpu,
+             VEL_VRING_ALIGN);
+
+  writel(idx, device->bar0 + VEL_REG_VQ_SELECT);
+
+  dma_addr_t desc = device->rproc.vrings[idx].dma;
+  dma_addr_t avail = desc + ((void *)vr.avail - device->rproc.vrings[idx].cpu);
+  dma_addr_t used = desc + ((void *)vr.used - device->rproc.vrings[idx].cpu);
+  writel(lower_32_bits(desc), device->bar0 + VEL_REG_VQ_DESC_LO);
+  writel(upper_32_bits(desc), device->bar0 + VEL_REG_VQ_DESC_HI);
+  writel(lower_32_bits(avail), device->bar0 + VEL_REG_VQ_AVAIL_LO);
+  writel(upper_32_bits(avail), device->bar0 + VEL_REG_VQ_AVAIL_HI);
+  writel(lower_32_bits(used), device->bar0 + VEL_REG_VQ_USED_LO);
+  writel(upper_32_bits(used), device->bar0 + VEL_REG_VQ_USED_HI);
+  writel(VEL_VRING_NUM, device->bar0 + VEL_REG_VQ_NUM);
+  writel(idx + 1, device->bar0 + VEL_REG_VQ_MSIX_VECTOR);
+  writel(1, device->bar0 + VEL_REG_VQ_ENABLE);
+}
+
 static int velocitor_rproc_start(struct rproc *rproc) {
   struct pci_dev *dev = to_pci_dev(rproc->dev.parent);
   const struct velocitor_dev *device = pci_get_drvdata(dev);
@@ -65,9 +87,14 @@ static int velocitor_rproc_start(struct rproc *rproc) {
                : -ETIMEDOUT;
   }
 
-  dev_info(&dev->dev, "rproc: firmware %s",
-           VEL_FW_STATUS_RUNNING == status ? "started" : "error");
-  return VEL_FW_STATUS_RUNNING == status ? 0 : -EIO;
+  if (VEL_FW_STATUS_RUNNING != status) {
+    dev_info(&dev->dev, "rproc: unable to start remote processor");
+    return -EIO;
+  }
+
+  for (int i = 0; i < 4; ++i)
+    velocitor_rproc_vring_initialize(device, i);
+  return 0;
 }
 
 static int velocitor_rproc_stop(struct rproc *rproc) {
@@ -111,28 +138,6 @@ velocitor_rproc_find_loaded_rsc_table(struct rproc *rproc,
   const struct velocitor_dev *device = pci_get_drvdata(dev);
 
   return device->rproc.rsc.cpu;
-}
-
-static void velocitor_rproc_vring_initialize(struct velocitor_dev *device,
-                                             u32 idx) {
-  struct vring vr;
-  vring_init(&vr, VEL_VRING_NUM, device->rproc.vrings[idx].cpu,
-             VEL_VRING_ALIGN);
-
-  writel(idx, device->bar0 + VEL_REG_VQ_SELECT);
-
-  dma_addr_t desc = device->rproc.vrings[idx].dma;
-  dma_addr_t avail = desc + ((void *)vr.avail - device->rproc.vrings[idx].cpu);
-  dma_addr_t used = desc + ((void *)vr.used - device->rproc.vrings[idx].cpu);
-  writel(lower_32_bits(desc), device->bar0 + VEL_REG_VQ_DESC_LO);
-  writel(upper_32_bits(desc), device->bar0 + VEL_REG_VQ_DESC_HI);
-  writel(lower_32_bits(avail), device->bar0 + VEL_REG_VQ_AVAIL_LO);
-  writel(upper_32_bits(avail), device->bar0 + VEL_REG_VQ_AVAIL_HI);
-  writel(lower_32_bits(used), device->bar0 + VEL_REG_VQ_USED_LO);
-  writel(upper_32_bits(used), device->bar0 + VEL_REG_VQ_USED_HI);
-  writel(VEL_VRING_NUM, device->bar0 + VEL_REG_VQ_NUM);
-  writel(idx + 1, device->bar0 + VEL_REG_VQ_MSIX_VECTOR);
-  writel(1, device->bar0 + VEL_REG_VQ_ENABLE);
 }
 
 static const struct rproc_ops velocitor_rproc_ops = {
@@ -183,9 +188,6 @@ int velocitor_remoteproc_initialize(struct pci_dev *dev) {
   dev_info(&dev->dev, "rproc: booting");
   if ((err = rproc_boot(device->rproc.handle)))
     return err;
-
-  for (int i = 0; i < 4; ++i)
-    velocitor_rproc_vring_initialize(device, i);
 
   return 0;
 }
