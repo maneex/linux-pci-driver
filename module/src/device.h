@@ -14,6 +14,13 @@ struct velocitor_dev {
   struct dentry *debugfs;
 
   struct {
+    struct {
+      u16 minor;
+      u16 major;
+    } version;
+  } identity;
+
+  struct {
     struct mutex lock;
   } counters;
 

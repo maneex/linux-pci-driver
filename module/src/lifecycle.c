@@ -6,13 +6,14 @@
 #include <linux/pci.h>
 
 // Velocitor headers.
-#include "../../qemu-device/velocitor_hw.h"
+#include <velocitor_hw.h>
 
 // Driver headers.
 #include "counters.h"
 #include "debugfs.h"
 #include "device.h"
 #include "dma.h"
+#include "identity.h"
 #include "irq.h"
 #include "window.h"
 
@@ -56,11 +57,6 @@ static int initialize_bar0(struct pci_dev *dev, struct velocitor_dev *device) {
     }
   }
 
-  // Read version.
-  u32 version = readl(device->bar0 + VEL_REG_VERSION);
-  dev_info(&dev->dev, "bar0: device version %d.%d", version >> 16,
-           version & 0xffff);
-
   return 0;
 }
 
@@ -94,6 +90,10 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   if ((err = initialize_bar0(dev, device)))
     return err;
   if ((err = initialize_bar2(dev, device)))
+    return err;
+
+  // Load module identity.
+  if ((err = velocitor_identity_initialize(dev)))
     return err;
 
   // Initialize the counters retrieval mechanism
