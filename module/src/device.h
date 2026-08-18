@@ -39,7 +39,7 @@ struct velocitor_dev {
     struct mutex lock;
   } window;
 
-  struct velocitor_vring vrings[4];
+  struct velocitor_vring vrings[VEL_VRINGS_COUNT];
 
   struct {
     struct rproc *handle;

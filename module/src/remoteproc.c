@@ -28,7 +28,7 @@ static int velocitor_rproc_prepare(struct rproc *rproc) {
   rproc_add_carveout(rproc, mem);
 
   // vrings.
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; i < VEL_VRINGS_COUNT; ++i) {
     mem = rproc_mem_entry_init(rproc->dev.parent, device->vrings[i].mem.cpu,
                                device->vrings[i].mem.dma, VEL_VRING_SIZE,
                                FW_RSC_ADDR_ANY, NULL, NULL, "vdev%dvring%d",
