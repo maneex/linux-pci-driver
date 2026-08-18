@@ -63,7 +63,7 @@ static int velocitor_debugfs_inject_error(void *dev, u64 cmd) {
   if (cmd > 255)
     return -EINVAL;
 
-  struct Device *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
   writel(cmd, device->bar0 + VEL_REG_ERR_INJECT);
   return 0;
 }
@@ -82,9 +82,9 @@ static ssize_t velocitor_debugfs_dma_pool_read(struct file *file,
                                                char __user *buf, size_t len,
                                                loff_t *ppos) {
   struct pci_dev *dev = file->private_data;
-  struct Device *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
 
-  return simple_read_from_buffer(buf, len, ppos, device->dma_cpu_addr,
+  return simple_read_from_buffer(buf, len, ppos, device->dma.cpu_addr,
                                  VEL_HOST_POOL_SIZE);
 }
 
@@ -92,9 +92,9 @@ static ssize_t velocitor_debugfs_dma_pool_write(struct file *file,
                                                 const char __user *buf,
                                                 size_t len, loff_t *ppos) {
   struct pci_dev *dev = file->private_data;
-  struct Device *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
 
-  return simple_write_to_buffer(device->dma_cpu_addr, VEL_HOST_POOL_SIZE, ppos,
+  return simple_write_to_buffer(device->dma.cpu_addr, VEL_HOST_POOL_SIZE, ppos,
                                 buf, len);
 }
 
@@ -190,7 +190,7 @@ static const struct file_operations velocitor_debugfs_mem_fops = {
 
 int velocitor_debugfs_initialize(struct pci_dev *dev, struct dentry *root) {
   int err = 0;
-  struct Device *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
 
   device->debugfs = debugfs_create_dir(pci_name(dev), root);
   if ((err = devm_add_action_or_reset(&dev->dev, velocitor_debugfs_release,

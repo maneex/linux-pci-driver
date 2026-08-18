@@ -10,18 +10,18 @@
 #include "trace.h"
 #include "window.h"
 
-static int velocitor_window_seek(struct Device *device, u32 offset) {
+static int velocitor_window_seek(struct velocitor_dev *device, u32 offset) {
   writel(offset, device->bar0 + VEL_REG_WIN_BASE);
   u32 position = readl(device->bar0 + VEL_REG_WIN_BASE);
-  trace_velocitor_winmove(device->last_known_winbase, position,
+  trace_velocitor_winmove(device->window.base, position,
                           (void *)_RET_IP_);
-  device->last_known_winbase = position;
+  device->window.base = position;
   return offset == position;
 }
 
 int velocitor_window_read(struct pci_dev *dev, void *dst, size_t offset,
                           size_t size) {
-  struct Device *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
   int err = 0;
   size_t end = 0;
   if ((check_add_overflow(offset, size, &end)) || (end > VEL_MEM_SIZE))
@@ -29,7 +29,7 @@ int velocitor_window_read(struct pci_dev *dev, void *dst, size_t offset,
 
   size_t window = ALIGN_DOWN(offset, VEL_WINDOW_SIZE);
 
-  mutex_lock(&device->lock_winbase);
+  mutex_lock(&device->window.lock);
 
   if (!velocitor_window_seek(device, window)) {
     err = -EIO;
@@ -53,6 +53,6 @@ int velocitor_window_read(struct pci_dev *dev, void *dst, size_t offset,
   }
 
 out:
-  mutex_unlock(&device->lock_winbase);
+  mutex_unlock(&device->window.lock);
   return err;
 }

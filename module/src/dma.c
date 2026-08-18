@@ -1,9 +1,12 @@
+// Linux headers.
 #include <linux/dma-mapping.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
 
+// Velocitor headers.
 #include <velocitor_hw.h>
 
+// Driver headers.
 #include "device.h"
 #include "dma.h"
 #include "trace.h"
@@ -12,38 +15,18 @@
 
 static void velocitor_dma_release(void *data) {
   struct pci_dev *dev = data;
-  struct Device *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
 
-  dma_free_coherent(&dev->dev, VEL_HOST_POOL_SIZE, device->dma_cpu_addr,
-                    device->dma_handle);
-  device->dma_cpu_addr = NULL;
-  device->dma_handle = 0;
-}
-
-int velocitor_dma_initialize(struct pci_dev *dev) {
-  int err = 0;
-  struct Device *device = pci_get_drvdata(dev);
-
-  pci_set_master(dev);
-  if ((err = dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(VEL_DMA_BITS))))
-    return err;
-  dev_info(&dev->dev, "dma: width %d bits", VEL_DMA_BITS);
-
-  device->dma_cpu_addr = dma_alloc_coherent(&dev->dev, VEL_HOST_POOL_SIZE,
-                                            &device->dma_handle, GFP_KERNEL);
-  if (NULL == device->dma_cpu_addr)
-    return -ENOMEM;
-
-  if ((err = devm_add_action_or_reset(&dev->dev, velocitor_dma_release, dev)))
-    return err;
-
-  return 0;
+  dma_free_coherent(&dev->dev, VEL_HOST_POOL_SIZE, device->dma.cpu_addr,
+                    device->dma.handle);
+  device->dma.cpu_addr = NULL;
+  device->dma.handle = 0;
 }
 
 //-EIO, -EDTIMEOUT
 static int velocitor_dma_dbg_(struct pci_dev *dev, u32 dir, u32 offset,
                               u32 pool_offset, u32 len, u32 *err_code) {
-  struct Device *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
 
   // Sanity check.
   u32 end = 0;
@@ -52,8 +35,8 @@ static int velocitor_dma_dbg_(struct pci_dev *dev, u32 dir, u32 offset,
     return -EINVAL;
 
   // Write target address
-  u64 target = (device->dma_handle + pool_offset);
-  mutex_lock(&device->lock_dmadbg);
+  u64 target = (device->dma.handle + pool_offset);
+  mutex_lock(&device->dma.dbg_lock);
   writel(lower_32_bits(target), device->bar0 + VEL_REG_DBG_DMA_ADDR_LO);
   writel(upper_32_bits(target), device->bar0 + VEL_REG_DBG_DMA_ADDR_HI);
 
@@ -80,11 +63,31 @@ static int velocitor_dma_dbg_(struct pci_dev *dev, u32 dir, u32 offset,
       *err_code = 0;
   }
 
-  mutex_unlock(&device->lock_dmadbg);
+  mutex_unlock(&device->dma.dbg_lock);
 
   trace_velocitor_dma_dbg(dir, offset, pool_offset, len, res, status,
                           NULL == err_code ? 0 : *err_code);
   return res;
+}
+
+int velocitor_dma_initialize(struct pci_dev *dev) {
+  int err = 0;
+  struct velocitor_dev *device = pci_get_drvdata(dev);
+
+  pci_set_master(dev);
+  if ((err = dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(VEL_DMA_BITS))))
+    return err;
+  dev_info(&dev->dev, "dma: width %d bits", VEL_DMA_BITS);
+
+  device->dma.cpu_addr = dma_alloc_coherent(&dev->dev, VEL_HOST_POOL_SIZE,
+                                            &device->dma.handle, GFP_KERNEL);
+  if (NULL == device->dma.cpu_addr)
+    return -ENOMEM;
+
+  if ((err = devm_add_action_or_reset(&dev->dev, velocitor_dma_release, dev)))
+    return err;
+
+  return 0;
 }
 
 int velocitor_dma_dbg_write(struct pci_dev *dev, u32 offset, u32 pool_offset,

@@ -6,18 +6,18 @@
 #include "device.h"
 
 void velocitor_reset_counters(struct pci_dev *dev) {
-  struct Device *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
 
   // Thou shalt not reset while I'm reading.
-  mutex_lock(&device->lock_counters);
+  mutex_lock(&device->counters.lock);
   writel(1, device->bar0 + VEL_REG_CNT_RESET);
-  mutex_unlock(&device->lock_counters);
+  mutex_unlock(&device->counters.lock);
 }
 
 void velocitor_read_counters(struct pci_dev *dev, struct counters *counters) {
-  struct Device *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
 
-  mutex_lock(&device->lock_counters);
+  mutex_lock(&device->counters.lock);
 
   // Snapshot counters..
   writel(1, device->bar0 + VEL_REG_CNT_SNAP);
@@ -45,5 +45,5 @@ void velocitor_read_counters(struct pci_dev *dev, struct counters *counters) {
   counters->cycles_e0 = readl(device->bar0 + VEL_REG_CNT_CYCLES_E0);
   counters->cycles_e1 = readl(device->bar0 + VEL_REG_CNT_CYCLES_E1);
 
-  mutex_unlock(&device->lock_counters);
+  mutex_unlock(&device->counters.lock);
 }

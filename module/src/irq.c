@@ -43,7 +43,7 @@ static irqreturn_t irq_queue3_event(int irq, void *dev) {
 
 static irqreturn_t irq_error_event(int irq, void *data) {
   struct pci_dev *dev = data;
-  struct Device *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
 
   trace_velocitor_irq(5);
   // FIXME ! Do something :)

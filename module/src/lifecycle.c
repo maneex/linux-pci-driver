@@ -25,7 +25,7 @@ static struct dentry *velocitor_debugfs_root = 0;
 
 // https : // www.kernel.org/doc/html/v6.0/PCI/pci.html
 
-static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
+static int initialize_bar0(struct pci_dev *dev, struct velocitor_dev *device) {
   // Get mapping
   device->bar0 = pcim_iomap_region(dev, 0, KBUILD_MODNAME);
   if (IS_ERR(device->bar0))
@@ -62,7 +62,7 @@ static int initialize_bar0(struct pci_dev *dev, struct Device *device) {
   return 0;
 }
 
-static int initialize_bar2(struct pci_dev *dev, struct Device *device) {
+static int initialize_bar2(struct pci_dev *dev, struct velocitor_dev *device) {
   device->bar2 = pcim_iomap_region(dev, 2, KBUILD_MODNAME);
   if (IS_ERR(device->bar2))
     return PTR_ERR(device->bar2);
@@ -73,18 +73,18 @@ static int initialize_bar2(struct pci_dev *dev, struct Device *device) {
 static int velocitor_pci_probe(struct pci_dev *dev,
                                const struct pci_device_id *device_id) {
   int err = 0;
-  struct Device *device =
-      devm_kzalloc(&(dev->dev), sizeof(struct Device), GFP_KERNEL);
+  struct velocitor_dev *device =
+      devm_kzalloc(&(dev->dev), sizeof(struct velocitor_dev), GFP_KERNEL);
   if (NULL == device)
     return -ENOMEM;
 
-  if ((err = devm_mutex_init(&dev->dev, &device->lock_counters)))
+  if ((err = devm_mutex_init(&dev->dev, &device->counters.lock)))
     return err;
 
-  if ((err = devm_mutex_init(&dev->dev, &device->lock_winbase)))
+  if ((err = devm_mutex_init(&dev->dev, &device->window.lock)))
     return err;
 
-  if ((err = devm_mutex_init(&dev->dev, &device->lock_dmadbg)))
+  if ((err = devm_mutex_init(&dev->dev, &device->dma.dbg_lock)))
     return err;
 
   pci_set_drvdata(dev, device);
