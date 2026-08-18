@@ -13,10 +13,18 @@
 
 // Linux headers.
 #include <linux/tracepoint.h>
-TRACE_EVENT(velocitor_irq, TP_PROTO(unsigned int vector), TP_ARGS(vector),
-            TP_STRUCT__entry(__field(unsigned int, vector)),
-            TP_fast_assign(__entry->vector = vector;),
-            TP_printk("vector=%u", __entry->vector));
+TRACE_EVENT(velocitor_irq_vring,
+            TP_PROTO(unsigned int vector, unsigned int notifyid,
+                     bool dispatched),
+            TP_ARGS(vector, notifyid, dispatched),
+            TP_STRUCT__entry(__field(unsigned int, vector)
+                                 __field(unsigned int, notifyid)
+                                     __field(bool, dispatched)),
+            TP_fast_assign(__entry->vector = vector;
+                           __entry->notifyid = notifyid;
+                           __entry->dispatched = dispatched;),
+            TP_printk("vector=%u notifyid=%u dispatched=%d", __entry->vector,
+                      __entry->notifyid, __entry->dispatched));
 
 TRACE_EVENT(velocitor_irq_cfg, TP_PROTO(unsigned int status), TP_ARGS(status),
             TP_STRUCT__entry(__field(unsigned int, status)),

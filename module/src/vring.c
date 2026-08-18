@@ -64,3 +64,11 @@ void velocitor_vrings_activate(struct pci_dev *dev) {
   for (int i = 0; i < VEL_VRINGS_COUNT; ++i)
     velocitor_vrings_activate_(device, device->vrings + i);
 }
+
+void velocitor_vrings_invalidate(struct pci_dev *dev) {
+  struct velocitor_dev *device = pci_get_drvdata(dev);
+  for (int i = 0; i < VEL_VRINGS_COUNT; ++i) {
+    device->vrings[i].notifyid = -1;
+    memset(device->vrings[i].mem.cpu, 0x00, VEL_VRING_SIZE);
+  }
+}

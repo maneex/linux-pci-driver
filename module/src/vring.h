@@ -26,5 +26,6 @@ struct velocitor_vring {
 
 int velocitor_vrings_initialize(struct pci_dev *dev);
 void velocitor_vrings_activate(struct pci_dev *dev);
+void velocitor_vrings_invalidate(struct pci_dev *dev);
 
 #endif // not VELOCITOR_VRING_H

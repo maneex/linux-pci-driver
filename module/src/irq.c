@@ -2,6 +2,9 @@
 #include <linux/pci.h>
 #include <linux/remoteproc.h>
 
+// Do not reorder.
+#include "remoteproc_internal.h"
+
 // Velotcitor headers.
 #include <velocitor_hw.h>
 
@@ -27,7 +30,13 @@ static irqreturn_t irq_config_event(int irq, void *data) {
 
 static irqreturn_t irq_queue_event(int irq, void *data) {
   const struct velocitor_vring *vring = data;
-  trace_velocitor_irq(vring->vector);
+  const struct velocitor_dev *device = pci_get_drvdata(vring->dev);
+
+  if (NULL != device->rproc.handle) {
+    irqreturn_t res = rproc_vq_interrupt(device->rproc.handle, vring->notifyid);
+    trace_velocitor_irq_vring(vring->vector, vring->notifyid,
+                              IRQ_HANDLED == res);
+  }
   return IRQ_HANDLED;
 }
 

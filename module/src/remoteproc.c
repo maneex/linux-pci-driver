@@ -41,10 +41,26 @@ static int velocitor_rproc_prepare(struct rproc *rproc) {
   return 0;
 }
 
-static int velocitor_rproc_walk_rsc_table(struct pci_dev *dev,
-                                          struct velocitor_dev *device) {
-  // FIXME ! Look for vring notifyid.
-  return 0;
+static int velocitor_rproc_walk_rsc_table(struct velocitor_dev *device,
+                                          struct rproc *rproc) {
+  if (NULL == rproc->cached_table)
+    return -EIO;
+
+  int vring_index = 0;
+  for (int i = 0; i < rproc->cached_table->num; ++i) {
+    struct fw_rsc_hdr *header =
+        (void *)rproc->cached_table + rproc->cached_table->offset[i];
+    if (RSC_VDEV != header->type)
+      continue;
+
+    struct fw_rsc_vdev *vdev = (void *)header + sizeof(struct fw_rsc_hdr);
+    for (u8 j = 0; j < vdev->num_of_vrings; ++j) {
+      if (vring_index >= VEL_VRINGS_COUNT)
+        return -EINVAL;
+      device->vrings[vring_index++].notifyid = vdev->vring[j].notifyid;
+    }
+  }
+  return VEL_VRINGS_COUNT == vring_index ? 0 : -EINVAL;
 }
 
 static int velocitor_rproc_start(struct rproc *rproc) {
@@ -52,6 +68,8 @@ static int velocitor_rproc_start(struct rproc *rproc) {
   struct velocitor_dev *device = pci_get_drvdata(dev);
 
   dev_info(&dev->dev, "rproc: starting");
+
+  velocitor_vrings_invalidate(dev);
 
   writel(lower_32_bits(device->rproc.rsc.dma),
          device->bar0 + VEL_REG_RSC_ADDR_LO);
@@ -78,7 +96,7 @@ static int velocitor_rproc_start(struct rproc *rproc) {
 
   // Initialize vrings
   int err = 0;
-  if ((err = velocitor_rproc_walk_rsc_table(dev, device)))
+  if ((err = velocitor_rproc_walk_rsc_table(device, rproc)))
     return err;
   velocitor_vrings_activate(dev);
 
