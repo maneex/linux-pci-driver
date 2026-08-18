@@ -5,6 +5,7 @@
 #include <linux/pci.h>
 #include <linux/types.h>
 
+int velocitor_window_initialize(struct pci_dev *dev);
 int velocitor_window_read(struct pci_dev *dev, void *dst, size_t offset,
                           size_t size);
 

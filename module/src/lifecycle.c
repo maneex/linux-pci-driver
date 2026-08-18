@@ -9,10 +9,12 @@
 #include "../../qemu-device/velocitor_hw.h"
 
 // Driver headers.
+#include "counters.h"
 #include "debugfs.h"
 #include "device.h"
 #include "dma.h"
 #include "irq.h"
+#include "window.h"
 
 static const struct pci_device_id pci_id_table[] = {
     {PCI_DEVICE(VEL_PCI_VENDOR_ID, VEL_PCI_DEVICE_ID)},
@@ -78,15 +80,6 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   if (NULL == device)
     return -ENOMEM;
 
-  if ((err = devm_mutex_init(&dev->dev, &device->counters.lock)))
-    return err;
-
-  if ((err = devm_mutex_init(&dev->dev, &device->window.lock)))
-    return err;
-
-  if ((err = devm_mutex_init(&dev->dev, &device->dma.dbg_lock)))
-    return err;
-
   pci_set_drvdata(dev, device);
   dev_info(&dev->dev, "probe: device found");
 
@@ -101,6 +94,14 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   if ((err = initialize_bar0(dev, device)))
     return err;
   if ((err = initialize_bar2(dev, device)))
+    return err;
+
+  // Initialize the counters retrieval mechanism
+  if ((err = velocitor_counters_initialize(dev)))
+    return err;
+
+  // Initialize the windowed memory access.
+  if ((err = velocitor_window_initialize(dev)))
     return err;
 
   // Set the DMA mask size (for both coherent and streaming DMA)
