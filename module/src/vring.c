@@ -29,15 +29,15 @@ static int velocitor_vrings_initialize_(struct pci_dev *dev,
 }
 
 static void velocitor_vrings_activate_(const struct velocitor_dev *device,
-                                       u32 idx) {
+                                       const struct velocitor_vring *vring) {
   struct vring vr;
-  vring_init(&vr, VEL_VRING_NUM, device->vrings[idx].mem.cpu, VEL_VRING_ALIGN);
+  vring_init(&vr, VEL_VRING_NUM, vring->mem.cpu, VEL_VRING_ALIGN);
 
-  writel(idx, device->bar0 + VEL_REG_VQ_SELECT);
+  writel(vring->index, device->bar0 + VEL_REG_VQ_SELECT);
 
-  dma_addr_t desc = device->vrings[idx].mem.dma;
-  dma_addr_t avail = desc + ((void *)vr.avail - device->vrings[idx].mem.cpu);
-  dma_addr_t used = desc + ((void *)vr.used - device->vrings[idx].mem.cpu);
+  dma_addr_t desc = vring->mem.dma;
+  dma_addr_t avail = desc + ((void *)vr.avail - vring->mem.cpu);
+  dma_addr_t used = desc + ((void *)vr.used - vring->mem.cpu);
   writel(lower_32_bits(desc), device->bar0 + VEL_REG_VQ_DESC_LO);
   writel(upper_32_bits(desc), device->bar0 + VEL_REG_VQ_DESC_HI);
   writel(lower_32_bits(avail), device->bar0 + VEL_REG_VQ_AVAIL_LO);
@@ -45,7 +45,7 @@ static void velocitor_vrings_activate_(const struct velocitor_dev *device,
   writel(lower_32_bits(used), device->bar0 + VEL_REG_VQ_USED_LO);
   writel(upper_32_bits(used), device->bar0 + VEL_REG_VQ_USED_HI);
   writel(VEL_VRING_NUM, device->bar0 + VEL_REG_VQ_NUM);
-  writel(idx + 1, device->bar0 + VEL_REG_VQ_MSIX_VECTOR);
+  writel(vring->vector, device->bar0 + VEL_REG_VQ_MSIX_VECTOR);
   writel(1, device->bar0 + VEL_REG_VQ_ENABLE);
 }
 
@@ -62,5 +62,5 @@ void velocitor_vrings_activate(struct pci_dev *dev) {
   const struct velocitor_dev *device = pci_get_drvdata(dev);
 
   for (int i = 0; i < VEL_VRINGS_COUNT; ++i)
-    velocitor_vrings_activate_(device, i);
+    velocitor_vrings_activate_(device, device->vrings + i);
 }

@@ -3,9 +3,13 @@
 
 // Linux headers
 #include <linux/pci.h>
+#include <linux/virtio_ring.h>
 
 // Velocitor headers.
 #include <velocitor_hw.h>
+
+// Driver header
+#include "dma.h"
 
 #define VEL_VRINGS_COUNT 4
 
