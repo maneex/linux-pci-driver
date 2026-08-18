@@ -25,23 +25,9 @@ static irqreturn_t irq_config_event(int irq, void *data) {
   return IRQ_HANDLED;
 }
 
-static irqreturn_t irq_queue0_event(int irq, void *dev) {
-  trace_velocitor_irq(1);
-  return IRQ_HANDLED;
-}
-
-static irqreturn_t irq_queue1_event(int irq, void *dev) {
-  trace_velocitor_irq(2);
-  return IRQ_HANDLED;
-}
-
-static irqreturn_t irq_queue2_event(int irq, void *dev) {
-  trace_velocitor_irq(3);
-  return IRQ_HANDLED;
-}
-
-static irqreturn_t irq_queue3_event(int irq, void *dev) {
-  trace_velocitor_irq(4);
+static irqreturn_t irq_queue_event(int irq, void *data) {
+  const struct velocitor_vring *vring = data;
+  trace_velocitor_irq(vring->vector);
   return IRQ_HANDLED;
 }
 
@@ -77,18 +63,14 @@ int velocitor_irq_initialize(struct pci_dev *dev) {
   if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 0),
                               irq_config_event, 0, "velocitor-cfg", dev)))
     return err;
-  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 1),
-                              irq_queue0_event, 0, "velocitor-q0", dev)))
-    return err;
-  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 2),
-                              irq_queue1_event, 0, "velocitor-q1", dev)))
-    return err;
-  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 3),
-                              irq_queue2_event, 0, "velocitor-q2", dev)))
-    return err;
-  if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 4),
-                              irq_queue3_event, 0, "velocitor-q3", dev)))
-    return err;
+
+  struct velocitor_dev *device = pci_get_drvdata(dev);
+  for (unsigned i = 0; i < VEL_VRINGS_COUNT; ++i) {
+    if ((err = devm_request_irq(
+             &dev->dev, pci_irq_vector(dev, device->vrings[i].vector),
+             irq_queue_event, 0, device->vrings[i].name, device->vrings + i)))
+      return err;
+  }
 
   if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 5),
                               irq_error_event, 0, "velocitor-err", dev)))

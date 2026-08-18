@@ -7,10 +7,9 @@
 #include <linux/dma-mapping.h>
 #include <linux/mutex.h>
 
-struct velocitor_dma_buf {
-  void *cpu;
-  dma_addr_t dma;
-};
+// Driver headers.
+#include "dma.h"
+#include "vring.h"
 
 struct velocitor_dev {
   void __iomem *bar0;
@@ -40,10 +39,11 @@ struct velocitor_dev {
     struct mutex lock;
   } window;
 
+  struct velocitor_vring vrings[4];
+
   struct {
     struct rproc *handle;
     struct velocitor_dma_buf rsc;
-    struct velocitor_dma_buf vrings[4];
   } rproc;
 };
 

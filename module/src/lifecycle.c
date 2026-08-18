@@ -16,6 +16,7 @@
 #include "identity.h"
 #include "irq.h"
 #include "remoteproc.h"
+#include "vring.h"
 #include "window.h"
 
 static const struct pci_device_id pci_id_table[] = {
@@ -110,7 +111,10 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   if ((err = velocitor_dma_initialize(dev)))
     return err;
 
-  // Access device configuration space (if needed)
+  // Initialize vring structures.
+  if ((err = velocitor_vrings_initialize(dev)))
+    return err;
+
   // Register IRQ handler (request_irq())
   if ((err = velocitor_irq_initialize(dev)))
     return err;
