@@ -6,6 +6,7 @@
 
 // Driver headers
 #include "device.h"
+#include "error.h"
 #include "irq.h"
 
 // This is the one translation unit that emits the tracepoint symbols, so the
@@ -48,13 +49,15 @@ static irqreturn_t irq_queue3_event(int irq, void *dev) {
 
 static irqreturn_t irq_error_event(int irq, void *data) {
   struct pci_dev *dev = data;
-  const struct velocitor_dev *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
 
-  trace_velocitor_irq(5);
-  // FIXME ! Do something :)
+  struct velocitor_error error = {};
+  velocitor_error_read(device, &error);
 
   // Unlatch interrupt.
   writel(BIT(VEL_IRQ_VEC_ERROR), device->bar0 + VEL_REG_IRQ_ACK);
+
+  trace_velocitor_error(&error);
   return IRQ_HANDLED;
 }
 

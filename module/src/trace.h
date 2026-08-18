@@ -3,6 +3,8 @@
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM velocitor
 
+#include "error.h"
+
 // The include guard is deliberately conditional: define_trace.h re-reads this
 // header to emit the generated code, and TRACE_HEADER_MULTI_READ is how it
 // asks to be let through a second time.
@@ -19,12 +21,33 @@ TRACE_EVENT(velocitor_irq, TP_PROTO(unsigned int vector), TP_ARGS(vector),
 TRACE_EVENT(velocitor_irq_cfg, TP_PROTO(unsigned int status), TP_ARGS(status),
             TP_STRUCT__entry(__field(unsigned int, status)),
             TP_fast_assign(__entry->status = status;),
-            TP_printk("firwmare status=%s",
+            TP_printk("firmware status=%s",
                       __print_symbolic(__entry->status,
                                        {VEL_FW_STATUS_RESET, "reset"},
                                        {VEL_FW_STATUS_VERIFIED, "verified"},
                                        {VEL_FW_STATUS_RUNNING, "running"},
                                        {VEL_FW_STATUS_CRASHED, "crashed"})));
+
+TRACE_EVENT(
+    velocitor_error, TP_PROTO(struct velocitor_error *err), TP_ARGS(err),
+    TP_STRUCT__entry(__field_struct(struct velocitor_error, err)),
+    TP_fast_assign(__entry->err = *err;),
+    TP_printk(
+        "error code=%u(%s) info=%#llx notifyid=%u handle=%u generation=%u "
+        "dropped=%u",
+        __entry->err.code,
+        __print_symbolic(__entry->err.code, {VEL_ERR_NONE, "none"},
+                         {VEL_ERR_BAD_DESC, "bad descriptor"},
+                         {VEL_ERR_OUT_OF_BOUNDS, "out of bounds"},
+                         {VEL_ERR_BAD_HANDLE, "bad handle"},
+                         {VEL_ERR_DMA_WIDTH, "dma width"},
+                         {VEL_ERR_GEMM_DIMS, "gemm dims"},
+                         {VEL_ERR_DTYPE, "dtype"}, {VEL_ERR_NOMEM, "nomem"},
+                         {VEL_ERR_WINDOW_MOVED, "window moved"},
+                         {VEL_ERR_STALE, "stale"},
+                         {VEL_ERR_FW_HEADER, "firmware header"}),
+        __entry->err.info, __entry->err.notifyid, __entry->err.handle,
+        __entry->err.generation, __entry->err.dropped));
 
 TRACE_EVENT(velocitor_winmove, TP_PROTO(u32 from, u32 to, void *caller),
             TP_ARGS(from, to, caller),
