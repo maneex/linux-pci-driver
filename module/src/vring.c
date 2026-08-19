@@ -8,9 +8,28 @@
 #include "device.h"
 #include "vring.h"
 
+static int velocitor_vrings_debugfs_show(struct seq_file *s, void *unused) {
+  struct velocitor_dev *device = pci_get_drvdata((struct pci_dev *)s->private);
+
+  for (int i = 0; i < VEL_VRINGS_COUNT; ++i) {
+    seq_printf(s, "vdev%dvring%d:\n", i / 2, i % 2);
+    seq_printf(s, "  irq:       %d\n", device->vrings[i].irq);
+    seq_printf(s, "  vector:    %d\n", device->vrings[i].vector);
+    seq_printf(s, "  notifyid:  %d\n", device->vrings[i].notifyid);
+    seq_printf(s, "  address:   cpu=%pS dma=%pS\n",
+               (void *)device->vrings[i].mem.cpu,
+               (void *)device->vrings[i].mem.dma);
+    seq_printf(s, "  vq_enable: %d\n\n", device->vrings[i].enabled);
+  }
+  return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(velocitor_vrings_debugfs);
+
 static int velocitor_vrings_initialize_(struct pci_dev *dev,
                                         struct velocitor_vring *vring,
                                         int idx) {
+  struct velocitor_dev *device = pci_get_drvdata(dev);
+
   vring->dev = dev;
   vring->index = idx;
   vring->vector = idx + 1;
@@ -25,11 +44,14 @@ static int velocitor_vrings_initialize_(struct pci_dev *dev,
   if (NULL == vring->mem.cpu)
     return -ENOMEM;
 
+  debugfs_create_file("vrings", 0444, device->debugfs, dev,
+                      &velocitor_vrings_debugfs_fops);
+
   return 0;
 }
 
 static void velocitor_vrings_activate_(const struct velocitor_dev *device,
-                                       const struct velocitor_vring *vring) {
+                                       struct velocitor_vring *vring) {
   struct vring vr;
   vring_init(&vr, VEL_VRING_NUM, vring->mem.cpu, VEL_VRING_ALIGN);
 
@@ -47,6 +69,8 @@ static void velocitor_vrings_activate_(const struct velocitor_dev *device,
   writel(VEL_VRING_NUM, device->bar0 + VEL_REG_VQ_NUM);
   writel(vring->vector, device->bar0 + VEL_REG_VQ_MSIX_VECTOR);
   writel(1, device->bar0 + VEL_REG_VQ_ENABLE);
+
+  vring->enabled = true;
 }
 
 int velocitor_vrings_initialize(struct pci_dev *dev) {
@@ -59,7 +83,7 @@ int velocitor_vrings_initialize(struct pci_dev *dev) {
 }
 
 void velocitor_vrings_activate(struct pci_dev *dev) {
-  const struct velocitor_dev *device = pci_get_drvdata(dev);
+  struct velocitor_dev *device = pci_get_drvdata(dev);
 
   for (int i = 0; i < VEL_VRINGS_COUNT; ++i)
     velocitor_vrings_activate_(device, device->vrings + i);
@@ -68,7 +92,10 @@ void velocitor_vrings_activate(struct pci_dev *dev) {
 void velocitor_vrings_invalidate(struct pci_dev *dev) {
   struct velocitor_dev *device = pci_get_drvdata(dev);
   for (int i = 0; i < VEL_VRINGS_COUNT; ++i) {
+    device->vrings[i].irq = -1;
     device->vrings[i].notifyid = -1;
+    device->vrings[i].vector = -1;
+    device->vrings[i].enabled = false;
     memset(device->vrings[i].mem.cpu, 0x00, VEL_VRING_SIZE);
   }
 }

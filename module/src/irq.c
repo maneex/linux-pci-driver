@@ -75,10 +75,10 @@ int velocitor_irq_initialize(struct pci_dev *dev) {
 
   struct velocitor_dev *device = pci_get_drvdata(dev);
   for (unsigned i = 0; i < VEL_VRINGS_COUNT; ++i) {
+    device->vrings[i].irq = pci_irq_vector(dev, device->vrings[i].vector);
     if ((err = devm_request_irq(
-             &dev->dev, pci_irq_vector(dev, device->vrings[i].vector),
-             irq_queue_event, 0, device->vrings[i].vector_name,
-             device->vrings + i)))
+             &dev->dev, device->vrings[i].irq, irq_queue_event, 0,
+             device->vrings[i].vector_name, device->vrings + i)))
       return err;
   }
 

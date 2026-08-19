@@ -17,11 +17,13 @@
 
 struct velocitor_vring {
   int index;
+  int irq;
   int vector;
   int notifyid;
   struct pci_dev *dev;
   struct velocitor_dma_buf mem;
   char *vector_name;
+  bool enabled;
 };
 
 int velocitor_vrings_initialize(struct pci_dev *dev);
