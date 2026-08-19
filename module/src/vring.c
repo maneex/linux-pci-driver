@@ -15,9 +15,9 @@ static int velocitor_vrings_initialize_(struct pci_dev *dev,
   vring->index = idx;
   vring->vector = idx + 1;
   vring->notifyid = -1;
-  vring->name =
-      devm_kasprintf(&dev->dev, GFP_KERNEL, "vdev%dvring%d", idx / 2, idx % 2);
-  if (NULL == vring->name)
+  vring->vector_name = devm_kasprintf(&dev->dev, GFP_KERNEL, "velocitor-v%dr%d",
+                                      idx / 2, idx % 2);
+  if (NULL == vring->vector_name)
     return -ENOMEM;
 
   vring->mem.cpu = dmam_alloc_coherent(&dev->dev, VEL_VRING_SIZE,

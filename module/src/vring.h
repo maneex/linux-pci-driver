@@ -21,7 +21,7 @@ struct velocitor_vring {
   int notifyid;
   struct pci_dev *dev;
   struct velocitor_dma_buf mem;
-  char *name;
+  char *vector_name;
 };
 
 int velocitor_vrings_initialize(struct pci_dev *dev);

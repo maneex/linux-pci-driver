@@ -77,7 +77,8 @@ int velocitor_irq_initialize(struct pci_dev *dev) {
   for (unsigned i = 0; i < VEL_VRINGS_COUNT; ++i) {
     if ((err = devm_request_irq(
              &dev->dev, pci_irq_vector(dev, device->vrings[i].vector),
-             irq_queue_event, 0, device->vrings[i].name, device->vrings + i)))
+             irq_queue_event, 0, device->vrings[i].vector_name,
+             device->vrings + i)))
       return err;
   }
 
