@@ -375,6 +375,7 @@ CHECKS=(
     # what proves the address the driver published is reachable.
     "VQ_ENABLE = 1             |writel $((BAR0 + 0x10c)) 0x00000001|"
     "queue 0 is enabled        |readl $((BAR0 + 0x10c))|0x0000000000000001"
+    "let virtual time pass     |clock_step 2000|"
     "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
     "no heads swept yet        |readl $((BAR0 + 0xa8))|0x0000000000000000"
 
@@ -383,33 +384,58 @@ CHECKS=(
     "VQ_NUM write while enabled|writel $((BAR0 + 0x108)) 0x00000008|"
     "VQ_NUM unchanged          |readl $((BAR0 + 0x108))|0x0000000000000100"
 
-    # Two heads published by the host, then the doorbell that announces them.
-    # The value is the notifyid, never the queue index -- there is no
-    # VQ_NOTIFYID register, and this is what makes the walk above load-bearing.
-    "avail.idx = 2             |write 0x1200002 2 0x0200|"
-    "avail.ring[0] = 5         |write 0x1200004 2 0x0500|"
-    "avail.ring[1] = 6         |write 0x1200006 2 0x0600|"
+    # A real receive buffer, and the announcement that consumes it.
+    #
+    # Queue 0 is what section 3.3 fixes as "what the device sends to Linux",
+    # so its available ring carries buffers the host lends the device rather
+    # than requests: one descriptor at 0x1210000 pointing at 0x1230000, and
+    # a single head published.  The doorbell then arms the sweep -- annex D.1
+    # forbids doing the work in the MMIO callback, so nothing has happened
+    # until virtual time moves.
+    "desc[0].addr = 0x1230000  |write 0x1210000 8 0x0000230100000000|"
+    "desc[0].len = 512         |write 0x1210008 4 0x00020000|"
+    "desc[0].flags = WRITE     |write 0x121000c 2 0x0200|"
+    "avail.ring[0] = 0         |write 0x1200004 2 0x0000|"
+    "avail.idx = 1             |write 0x1200002 2 0x0100|"
     "read of DOORBELL is WO    |readl $((BAR0 + 0x34))|0x00000000ffffffff"
     "ring the doorbell, id 0   |writel $((BAR0 + 0x34)) 0x00000000|"
+    "nothing yet, D.1          |read 0x1230000 4|0x00000000"
+    "let virtual time pass     |clock_step 2000|"
+
+    # The announcement of spec 7.1, byte for byte: an rpmsg header addressed
+    # from VEL_RPMSG_CTRL_ADDR to VEL_RPMSG_NS_ADDR, carrying a 40-byte
+    # rpmsg_ns_msg.  If either side gets this one wrong, no channel appears
+    # and nothing upstream can say why.
+    "hdr.src = 1024            |read 0x1230000 4|0x00040000"
+    "hdr.dst = 53 (NS)         |read 0x1230004 4|0x35000000"
+    "hdr.len = 40              |read 0x123000c 2|0x2800"
+    "ns.name = velocitor-ctrl  |read 0x1230010 8|0x76656c6f6369746f"
+    "ns.addr = 1024            |read 0x1230030 4|0x00040000"
+    "ns.flags = NS_CREATE      |read 0x1230034 4|0x00000000"
+
+    # And it was handed back through the used ring, with the byte count and
+    # the head the host had lent -- 16 of header plus 40 of payload.
+    "used.idx = 1              |read 0x1220002 2|0x0100"
+    "used.ring[0].id = 0       |read 0x1220004 4|0x00000000"
+    "used.ring[0].len = 56     |read 0x1220008 4|0x38000000"
     "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
     "CNT_DB_RX = 1             |readl $((BAR0 + 0x98))|0x0000000000000001"
-    "CNT_DESC = 2              |readl $((BAR0 + 0xa8))|0x0000000000000002"
+    "CNT_DESC = 1              |readl $((BAR0 + 0xa8))|0x0000000000000001"
 
-    # The sweep advanced its index, so a second doorbell with nothing new
-    # finds nothing new.  A model that re-read from zero would count four.
-    "doorbell again, nothing   |writel $((BAR0 + 0x34)) 0x00000000|"
-    "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
-    "CNT_DB_RX = 2             |readl $((BAR0 + 0x98))|0x0000000000000002"
-    "CNT_DESC still 2          |readl $((BAR0 + 0xa8))|0x0000000000000002"
+    # Announced once per generation: a second doorbell finds nothing to do.
+    "doorbell again            |writel $((BAR0 + 0x34)) 0x00000000|"
+    "let virtual time pass     |clock_step 2000|"
+    "used.idx still 1          |read 0x1220002 2|0x0100"
 
     # A doorbell that names no queue, and one that names a queue nobody
     # enabled: both counted, neither swept.  CNT_DB_RX is the truth about
     # what the driver did, not about what the device made of it (annex D.6).
     "doorbell for notifyid 99  |writel $((BAR0 + 0x34)) 0x00000063|"
     "doorbell for queue 3      |writel $((BAR0 + 0x34)) 0x00000003|"
+    "let virtual time pass     |clock_step 2000|"
     "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
     "CNT_DB_RX = 4             |readl $((BAR0 + 0x98))|0x0000000000000004"
-    "CNT_DESC still 2          |readl $((BAR0 + 0xa8))|0x0000000000000002"
+    "CNT_DESC still 1          |readl $((BAR0 + 0xa8))|0x0000000000000001"
 
     # Annex D.3: RESET purges the window and invalidates the table.  This is
     # what makes the driver reprogram both on every start -- and what makes a
@@ -420,7 +446,7 @@ CHECKS=(
     "the ring addresses stay   |readl $((BAR0 + 0x118))|0x0000000001200000"
     "doorbell after reset      |writel $((BAR0 + 0x34)) 0x00000000|"
     "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
-    "counted but not swept     |readl $((BAR0 + 0xa8))|0x0000000000000002"
+    "counted but not swept     |readl $((BAR0 + 0xa8))|0x0000000000000001"
 )
 
 commands=("${SETUP[@]}")
