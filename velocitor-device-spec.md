@@ -187,11 +187,11 @@ d'abord, jamais en adaptant silencieusement une des deux implémentations.
 |---|---|
 | Spécification | v0.6.3 — close ; cf. C.6 |
 | Versions Linux et QEMU épinglées | **Linux 6.18.44 · QEMU 7.2.22** — liste de vérification §C.4 **non exécutée** |
-| Modèle QEMU | étapes 2 à 5 faites, étape 6 faite côté device : identité PCI et les trois BAR, `SCRATCH`, compteurs et `CNT_SNAP`, MSI-X et `IRQ_*`, BAR2 avec aperture fixe, fenêtre glissante et relecture de `WIN_BASE`, bloc `DBG_DMA_*` asynchrone avec le piège des 42 bits, registres de table fantôme, cycle de vie `RESET`/`FW_STATUS`/`FW_ABI`/`GENERATION` avec vérification de l'en-tête firmware. Reste le `DOORBELL`, la fenêtre `VQ_*` et tout le §4.4 au-delà d'`ERR_CODE`/`ERR_INFO_*` |
+| Modèle QEMU | étapes 2 à 6 faites : identité PCI et les trois BAR, `SCRATCH`, compteurs et `CNT_SNAP`, MSI-X et `IRQ_*`, BAR2 avec aperture fixe, fenêtre glissante et relecture de `WIN_BASE`, bloc `DBG_DMA_*` asynchrone avec le piège des 42 bits, cycle de vie `RESET`/`FW_STATUS`/`FW_ABI`/`GENERATION` avec vérification de l'en-tête firmware, table fantôme et parcours des `notifyid`, fenêtre `VQ_*` complète, `DOORBELL` routé par `notifyid`, balayage de l'anneau `avail`, purge des queues au reset et au crash (D.3, §6.5), §4.4 complet avec `ERR_DROPPED`. Reste le §7 : consommer les descripteurs et l'endpoint rpmsg de D.5 |
 | Firmware | généré — `firmware/mkfw.c` produit `velocitor-fw.elf` : en-tête du §6.6 et table de ressources du §6.3 (carveout `heap`, deux vdev de deux vrings). Aucun code, le modèle joue le processeur |
-| Driver noyau | étapes 2 à 5 faites : `probe` en devres intégral, BAR0 et BAR2 mappées, masque DMA et pool cohérent, six vecteurs MSI-X, lecture fenêtrée de la mémoire device, transferts `DBG_DMA_*` avec attente bornée, debugfs `counters` / `counters_reset` / `inject_error` / `dma_pool` / `dma_ctrl` / `mem`, tracepoints `irq`, `winmove` et `dma_dbg`. Étape 6 non commencée : pas de `rproc_ops` |
+| Driver noyau | étapes 2 à 6 faites : `probe` en devres intégral, BAR0 et BAR2 mappées, masque DMA et pool cohérent, six vecteurs MSI-X, lecture fenêtrée de la mémoire device, transferts `DBG_DMA_*` avec attente bornée, `rproc_ops` complet — carveouts, `da_to_va`, `find_loaded_rsc_table`, table fantôme, boot jusqu'à `FW_STATUS = 2` —, module `vring` autonome, parcours de `cached_table` pour les `notifyid`, fenêtre `VQ_*` programmée dans `ops->start()` donc rejouée à la reprise, `rproc_vq_interrupt()` routé par cookie d'IRQ, `rproc_report_crash()` sur le vecteur d'erreur, debugfs `counters` / `counters_reset` / `inject_error` / `dma_pool` / `dma_ctrl` / `mem`, tracepoints `irq`, `irq_cfg`, `error`, `winmove` et `dma_dbg` — le premier diverge du §11, cf. §14. Reste de l'étape 6 : `TOPOLOGY`/`MEM_SIZE`/`CAPS`, vérification de `FW_ABI`, `GENERATION`, et l'anneau de trace en debugfs |
 | Runtime utilisateur | non commencé |
-| Tests | couche 1 — `devtools/qtest-probe.sh`, 96 vérifications sans Linux. Couche 2 — `devtools/guest-dma-test.sh`, aller-retour DMA, contrôle croisé fenêtre / DMA et passe de *fuzzing* rejouable par graine. Couche 3 inexistante |
+| Tests | couche 1 — `devtools/qtest-probe.sh`, 123 vérifications sans Linux, transport compris : parcours des `notifyid`, fenêtre `VQ_*`, routage du `DOORBELL`, balayage de l'`avail`, purge au reset, `ERR_DROPPED`. Couche 2 — `devtools/guest-dma-test.sh`, aller-retour DMA, contrôle croisé fenêtre / DMA et passe de *fuzzing* rejouable par graine. Couche 3 inexistante |
 | En-tête partagé des constantes | écrit — `qemu-device/velocitor_hw.h`, consommé tel quel par le modèle, le driver et le générateur de firmware |
 
 ### 0.8 Glossaire minimal
@@ -563,14 +563,28 @@ par la mémoire invitée directement (annexe D).
 > `rproc_find_carveout_by_name()` n'est pas un symbole exporté.
 
 Ordre d'initialisation par queue : `VQ_SELECT`, adresses, `VQ_NUM`, `VQ_MSIX_VECTOR`, puis
-`VQ_ENABLE = 1` en dernier. Le device ignore toute activité sur une queue non activée.
+`VQ_ENABLE = 1` en dernier. Le device ignore toute activité sur une queue non activée, et
+refuse toute écriture de description sur une queue qui l'est : `VQ_ENABLE` gèle l'anneau
+autant qu'il l'ouvre.
+
+**Le driver remet les quatre anneaux à zéro avant de les programmer**, à chaque démarrage
+(§5, étape 12). C'est la condition pour que le balayage ci-dessous ne relise pas l'`avail`
+d'une génération morte.
 
 > **Au passage de `VQ_ENABLE` à 1, le device doit balayer l'anneau `avail`** comme si un
-> doorbell venait d'arriver. Ce n'est pas une optimisation : `virtio_rpmsg_bus` remplit ses
-> tampons de réception et fait un `virtqueue_kick()` dès son *probe*, qui a lieu **pendant**
-> `rproc_boot()`, donc avant que les `VQ_*` ne soient programmés. Ce premier doorbell est
-> perdu par construction. Sans balayage à l'activation, le plan de contrôle ne démarre
-> jamais et rien ne l'explique.
+> doorbell venait d'arriver.
+>
+> Le motif d'origine a disparu, et il vaut d'être noté. Tant que la fenêtre était programmée
+> au retour de `rproc_boot()`, le `virtqueue_kick()` que `virtio_rpmsg_bus` émet dès son
+> *probe* arrivait sur une queue encore inactive : ce premier doorbell était perdu par
+> construction, et sans balayage à l'activation le plan de contrôle ne démarrait jamais.
+> Depuis que la programmation a lieu dans `ops->start()` (§5), la queue est active avant que
+> le sous-périphérique n'existe, et le doorbell arrive normalement.
+>
+> **L'obligation reste**, pour deux raisons : elle coûte une lecture DMA d'un anneau vide, et
+> elle tient pour n'importe quel driver — y compris un qui reviendrait à l'ordre précédent,
+> ou un second driver écrit contre cette spec. Un contrat qui ne serait vrai que pour une
+> implémentation n'est pas un contrat.
 
 ### 4.3 DMA de *bring-up*
 
@@ -627,6 +641,13 @@ driver appelle `rproc_report_crash()` — appelable depuis un contexte d'interru
 
 `ERR_DROPPED` est le registre le plus important du bloc : il rend visible ce que le driver
 n'a pas vu.
+
+**Acquittement et écrasement.** Une erreur est « vue » quand le driver a acquitté le vecteur
+5 : `IRQ_ACK` est le seul signal par lequel l'hôte dit avoir lu le bloc. Tant que ce latch est
+levé, une nouvelle erreur **n'écrase rien** et se contente d'incrémenter `ERR_DROPPED`. Le
+bloc conserve donc la **première** — la cause — et non la dernière, qui n'est le plus souvent
+qu'un symptôme de la cascade qu'elle a déclenchée. Un driver arrivé en retard lit la cause,
+plus le compte de ce qui a suivi.
 
 ### 4.5 Compteurs
 
@@ -704,24 +725,45 @@ du projet.
     résout les carveouts, appelle `load`, puis `find_loaded_rsc_table` — qui rend la table
     fantôme, dans laquelle le core recopie `cached_table` — puis `start`
 11. `start` publie `RSC_ADDR_*` et `RSC_VALID`, relâche `RESET`, et attend `FW_STATUS == 2`
-12. **puis seulement** le core démarre les sous-périphériques : les `virtio_device` sont
-    enregistrés, leurs drivers appellent `find_vqs()`, les vrings sont construits sur la
+12. **toujours dans `start`** : remise à zéro des quatre anneaux, lecture des `notifyid` dans
+    la table fantôme, puis programmation de la fenêtre `VQ_*` (§4.2) — adresses bus
+    complètes, taille, vecteur MSI-X, et `VQ_ENABLE = 1` en dernier
+13. au retour de `ops->start()`, le core démarre les sous-périphériques : les `virtio_device`
+    sont enregistrés, leurs drivers appellent `find_vqs()`, les vrings sont construits sur la
     mémoire préallouée, `gfeatures` et le statut sont écrits dans la table fantôme
-13. au retour de `rproc_boot()`, pour chaque vring : programmation de la fenêtre `VQ_*`
-    (§4.2) — adresses bus complètes, taille, vecteur MSI-X, puis `VQ_ENABLE = 1`
 14. vdev0 → rpmsg, service `velocitor-ctrl` ; vdev1 → driver virtio de données
 15. `VEL_IOC_INFO` passe de `BOOTING` à `READY` (§10.2)
 
+> **Pourquoi la fenêtre `VQ_*` est programmée dans `start` et non au retour de
+> `rproc_boot()`.** La récupération après crash du §6.5 ne repasse pas par `rproc_boot()` :
+> `rproc_boot_recovery()` enchaîne `rproc_stop()` puis `rproc_start()`, donc ni `prepare` ni
+> le code appelant ne sont rejoués. Toute programmation placée après le retour de
+> `rproc_boot()` n'a lieu qu'une fois dans la vie du device, alors que le §6.5 remet
+> justement tous les `VQ_ENABLE` à zéro au plantage. `ops->start()` est le seul point du
+> chemin qui soit rejoué à l'identique aux deux démarrages.
+>
+> **La remise à zéro des anneaux fait partie du contrat, pas de l'hygiène.**
+> `vring_new_virtqueue()` remet ses propres compteurs à zéro — `last_used_idx`,
+> `avail_idx_shadow` — mais ne touche pas la mémoire de l'anneau, que le driver a allouée.
+> À la deuxième génération, `avail->idx` porte donc encore la valeur de la précédente
+> pendant que le device, sorti de reset, repart de zéro : il balaierait des descripteurs
+> morts. C'est l'ABA du §6.5, transposé du handle vers l'anneau.
+
 > **`FW_STATUS == 2` signifie « firmware démarré », pas « IPC prêt ».** Les virtqueues
 > n'existent pas encore côté Linux à ce moment : le core ne démarre les sous-périphériques
-> qu'après le retour de `ops->start()`, et les registres `VQ_*` ne sont programmés qu'après
-> le retour de `rproc_boot()`.
+> qu'après le retour de `ops->start()`.
 >
-> **Le contrat de handoff est donc `VQ_ENABLE`, pas `FW_STATUS`, ni `DRIVER_OK`.** Le statut
-> virtio est bien lisible dans la table fantôme depuis la v0.6.3, mais il est posé par
-> `virtio_device_ready()` *pendant* `rproc_boot()` : `VQ_ENABLE` reste strictement le plus
-> tardif des trois signaux, donc le seul correct. Le modèle QEMU ne doit toucher à une queue
-> qu'une fois celle-ci activée.
+> **`VQ_ENABLE` reste le contrat de handoff — mais il n'est plus le plus tardif des trois
+> signaux.** Il précède désormais `DRIVER_OK`, que `virtio_device_ready()` pose pendant le
+> démarrage des sous-périphériques. Le modèle peut donc balayer un anneau que virtio n'a pas
+> encore construit ; ce qui rend l'opération sûre est la remise à zéro de l'étape 12, qui
+> laisse `avail->idx = 0` — un anneau vide, et exactement l'état sur lequel
+> `vring_new_virtqueue()` s'attend à construire.
+>
+> `VQ_ENABLE` garde son rôle de barrière : **le modèle ne touche à une queue qu'une fois
+> celle-ci activée.** Ce qu'il ne garantit plus, c'est que l'hôte ait fini de négocier — d'où
+> la relecture de `gfeatures` à chaque usage plutôt qu'une seule fois à l'activation
+> (annexe D.4).
 
 Le char device `/dev/velocitor` est enregistré dès l'étape 1, pas à la fin. Il refuse les
 opérations avec `-ENODEV` tant que les sous-drivers ne sont pas prêts (§10.1) : c'est ce qui
@@ -906,8 +948,13 @@ Séquence de récupération, à spécifier des deux côtés :
    réveillés ;
 3. remoteproc arrête, recharge, redémarre — les sous-drivers sont détruits dans l'ordre
    inverse de leur construction : data, puis ctrl, puis rproc ;
-4. `GENERATION` s'incrémente, les vdev sont recréés, l'UAPI repasse à `READY` ;
-5. les `DeviceBuffer` de l'ancienne génération restent constructibles mais toute opération
+4. **`ops->start()` reprogramme intégralement le transport** : anneaux remis à zéro,
+   `notifyid` relus dans la table fantôme, fenêtre `VQ_*` réécrite, `VQ_ENABLE` relevé (§5,
+   étape 12). Rien de ce que la génération précédente avait programmé ne survit — le point 1
+   l'a effacé côté device, et `rproc_boot_recovery()` ne rejoue ni `prepare` ni le code qui
+   suit `rproc_boot()`. C'est ce qui impose de placer la programmation dans `start` ;
+5. `GENERATION` s'incrémente, les vdev sont recréés, l'UAPI repasse à `READY` ;
+6. les `DeviceBuffer` de l'ancienne génération restent constructibles mais toute opération
    sur eux retourne `-ESTALE` — ils ne mentent pas, ils échouent proprement.
 
 Le char device n'est jamais détruit pendant cette séquence : `VEL_IOC_INFO` rend
@@ -1688,6 +1735,25 @@ Le modèle QEMU se prête bien à ASan et UBSan, et au *fuzzing* de modèles de 
   l'étape 13**, sur le précédent du bit 6 ; le §12 item 6 exige de rendre compte du
   comportement sous chacune, ce qui suppose de savoir laquelle est encore active.
 
+- **Troisième champ du tracepoint `velocitor_irq`** — le driver de l'étape 6 le nomme
+  `velocitor_irq_vring` et lui ajoute le retour de `rproc_vq_interrupt()`. **C'est une
+  divergence, pas une correction** : le §11 tel qu'il est écrit est réalisable et conforme à
+  ce que fait un vrai driver, donc rien n'obligeait à le changer. L'argument pour : le
+  `notifyid` est constant par vecteur, donc le seul champ qui varierait est ce retour, et il
+  sépare deux pannes qu'on ne distingue pas autrement — une interruption arrivée avant que la
+  virtqueue n'existe (§5), et une correspondance vecteur → `notifyid` fausse. L'argument
+  contre : `rproc_vq_interrupt()` journalise déjà le `notifyid` par `dev_dbg`, et un champ de
+  plus dans un tracepoint du chemin d'interruption se paie à chaque événement. **À trancher
+  avant l'étape 7** : soit le §11 gagne le champ et le nom, soit le driver revient à deux.
+
+- **Qualification d'un plantage injecté** — le bit 2 d'`ERR_INJECT` (§9) fait passer
+  `FW_STATUS` à 3 et lève le vecteur 5, mais le §4.4 n'a aucun `ERR_CODE` pour « le test a
+  demandé un plantage ». Le modèle lève donc le vecteur **sans qualifier**, et le handler
+  d'erreur du driver trace un `ERR_CODE = 0` qui se lit « aucune erreur » au milieu d'un
+  crash. Inventer un code serait modifier le contrat, pas le modèle. À trancher à l'étape 13,
+  avec le reste des injections : soit un code d'injection au §4.4, soit `ERR_INFO` porte le
+  masque `ERR_INJECT` responsable et le §4.4 le dit.
+
 Sont sortis des points ouverts en v0.6.3 : les identifiants PCI (§2.1, valeurs assignées) et
 le dimensionnement de `VEL_MEM_SIZE`, qui n'était une dette que par rapport à l'étape
 safetensors, elle-même retirée du périmètre (§16).
@@ -1867,6 +1933,13 @@ le projet doit permettre de formuler.
 | étape 6 | `RESET` vaut 1 au démarrage ; `GENERATION` part de 0 et la première réussite la porte à 1 | rien n'est chargé, donc annoncer autre chose serait un mensonge sur lequel le driver pourrait agir. Et « aucun firmware n'a jamais tourné ici » se distingue ainsi de « un seul l'a fait » (§6.5) |
 | étape 6 | Relâcher `RESET` repart toujours de `FW_STATUS = 0`, y compris en sortie de `CRASHED` | le §4.1 dit qu'un en-tête invalide laisse `FW_STATUS` à 0 ; cela doit valoir en sortie de plantage comme à froid, sinon la reprise du §6.5 hérite du statut de la génération précédente |
 | étape 6 | Le passage `FW_STATUS` `1 → 2` est différé par un timer virtuel, comme le DMA | sans délai, l'attente de `FW_STATUS == 2` dans `ops->start()` serait une formalité qui n'attend rien, et un driver qui ne scruterait pas passerait tout de même |
+| **étape 6** | **Fenêtre `VQ_*` programmée dans `ops->start()`, plus au retour de `rproc_boot()` (§5, §6.5)** | **`rproc_boot_recovery()` enchaîne `rproc_stop()` + `rproc_start()` sans repasser par `rproc_boot()` ni par `prepare` : tout ce qui était programmé après le retour n'avait lieu qu'une fois, alors que le §6.5 remet tous les `VQ_ENABLE` à zéro au plantage. La spec décrivait une reprise qu'aucun des deux côtés n'aurait pu mener à bien — elle invalidait le transport sans dire qui le rétablissait** |
+| **étape 6** | **Le driver remet les quatre anneaux à zéro à chaque démarrage (§4.2, §5)** | **`vring_new_virtqueue()` remet ses compteurs à zéro sans toucher la mémoire de l'anneau, que le driver a allouée. À la génération suivante, `avail->idx` porte encore la valeur de la précédente pendant que le device repart de zéro : il consommerait des descripteurs morts. Même ABA que le §6.5, transposé du handle vers l'anneau — et invisible tant que personne ne provoque un crash** |
+| **étape 6** | **`gfeatures` et le statut virtio relus à chaque usage de la queue, pas une fois à `VQ_ENABLE` (D.4)** | **conséquence directe du déplacement ci-dessus : l'activation précède désormais le démarrage des sous-périphériques, donc la négociation. Deux lectures DMA par doorbell contre une valeur qui serait systématiquement fausse** |
+| **étape 6** | **Le bloc d'erreur conserve la **première** erreur non acquittée ; les suivantes n'incrémentent que `ERR_DROPPED` (§4.4)** | **le §4.4 définit `ERR_DROPPED` sans dire laquelle des deux survit. Garder la dernière donnerait au driver le symptôme d'une cascade avec la cause écrasée, ce qui vide le registre de son intérêt : « ce que le driver n'a pas vu » doit inclure ce qui l'a déclenché** |
+| étape 6 | Le parcours des `notifyid` a lieu à la montée de `RSC_VALID`, la validation reste `ver` et `num` | le device a maintenant besoin de la carte `notifyid` → queue, puisque le `DOORBELL` ne porte rien d'autre (§4.2). Mais une table qu'il ne sait pas parcourir n'est pas pour autant invalide : elle coûte le routage, pas la publication. Le journal le dit à la montée de `RSC_VALID`, pas au premier doorbell |
+| étape 6 | Le balayage de l'`avail` compte les têtes et avance son index, sans rien consommer | l'étape 6 ne peut honnêtement prétendre qu'à ceci : le doorbell arrive, les adresses publiées sont lisibles en bus-master, `CNT_DB_RX` et `CNT_DESC` le disent. Consommer appartient au §7 et à D.5. Ne pas avancer l'index recompterait les mêmes têtes à chaque doorbell — un compteur faux est pire ici qu'un compteur incomplet (D.6) |
+| étape 6 | Une écriture de description sur une queue activée est refusée et journalisée | le §4.2 met `VQ_ENABLE` en dernier pour que la description soit complète au moment de l'activation. En accepter une ensuite reviendrait à laisser le device lire un anneau dont l'adresse change sous lui ; la refuser transforme un bug de driver en ligne de log |
 
 ### Décisions écartées, et pourquoi
 
@@ -2061,11 +2134,20 @@ Au relâchement de `RESET`, le modèle vérifie `vel_fw_hdr` (§6.6) avant de po
 | Information | Source | Disponible à partir de |
 |---|---|---|
 | `notifyid` de chaque vring | table fantôme | `RSC_VALID = 1` |
-| `gfeatures` de chaque vdev | table fantôme | `VQ_ENABLE = 1` sur une queue du vdev |
+| `gfeatures` de chaque vdev | table fantôme | premier doorbell sur une queue du vdev |
 | statut virtio | table fantôme | idem |
 | adresses des anneaux, vecteur MSI-X | registres `VQ_*` | `VQ_ENABLE = 1` |
 
 Le modèle **n'écrit jamais** dans la table fantôme : elle appartient à Linux.
+
+> **`gfeatures` n'est pas disponible à `VQ_ENABLE`.** La v0.6.3 le supposait, parce qu'elle
+> plaçait la programmation de la fenêtre au retour de `rproc_boot()` — après la négociation.
+> Depuis que le §5 la place dans `ops->start()`, l'activation précède le démarrage des
+> sous-périphériques : à ce moment la table ne contient encore que des zéros.
+>
+> Le modèle relit donc `gfeatures` et le statut **à chaque usage de la queue**, pas une fois
+> à l'activation. Deux lectures DMA par doorbell, et la valeur est toujours celle du moment
+> où elle sert. La règle qui suit est inchangée, et c'est elle qui compte.
 
 Le modèle parse l'anneau selon `gfeatures`, jamais selon `dfeatures` — confondre les deux
 revient à parser selon ce qui a été offert et non selon ce qui a été accepté.
