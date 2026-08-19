@@ -312,6 +312,115 @@ CHECKS=(
     "FW_STATUS stayed at reset |readl $((BAR0 + 0x20))|0x0000000000000000"
     "ERR_CODE = 10 (fw header) |readl $((BAR0 + 0x50))|0x000000000000000a"
     "GENERATION did not move   |readl $((BAR0 + 0x3c))|0x0000000000000002"
+
+    # ---- Transport: notifyid walk, queue window, doorbell (spec 4.1, 4.2,
+    # annex D.2 and D.4) --------------------------------------------------
+    #
+    # Build a resource table the shape section 6.3 prescribes -- a carveout
+    # then two vdevs of two vrings -- and let the device learn which notifyid
+    # names which queue.  Everything below then hangs off that: the doorbell
+    # carries a notifyid and nothing else, so if the walk is wrong, no ring
+    # is ever swept and the counters stay at zero.
+    #
+    # qtest 'write' takes the bytes in the order given, so a little-endian
+    # word reads back reversed: 0x03000000 here is the value 3.
+    "ack the header error      |writel $((BAR0 + 0x30)) 0x00000020|"
+    "table ver = 1             |write 0x1100000 4 0x01000000|"
+    "num = 3 entries           |write 0x1100004 4 0x03000000|"
+    "offset[0] = 0x1c carveout |write 0x1100010 4 0x1c000000|"
+    "offset[1] = 0x54 vdev0    |write 0x1100014 4 0x54000000|"
+    "offset[2] = 0x98 vdev1    |write 0x1100018 4 0x98000000|"
+    "entry 0 type = CARVEOUT   |write 0x110001c 4 0x00000000|"
+    "entry 1 type = VDEV       |write 0x1100054 4 0x03000000|"
+    "vdev0 id = VIRTIO_ID_RPMSG|write 0x1100058 4 0x07000000|"
+    "vdev0 gfeatures = F_NS    |write 0x1100064 4 0x01000000|"
+    "vdev0 status/num_of_vrings|write 0x110006c 4 0x04020000|"
+    "vdev0 vring0 notifyid = 0 |write 0x110007c 4 0x00000000|"
+    "vdev0 vring1 notifyid = 1 |write 0x1100090 4 0x01000000|"
+    "entry 2 type = VDEV       |write 0x1100098 4 0x03000000|"
+    "vdev1 id = VEL_VIRTIO_ID  |write 0x110009c 4 0x00400000|"
+    "vdev1 status/num_of_vrings|write 0x11000b0 4 0x04020000|"
+    "vdev1 vring0 notifyid = 2 |write 0x11000c0 4 0x02000000|"
+    "vdev1 vring1 notifyid = 3 |write 0x11000d4 4 0x03000000|"
+    "RSC_LEN = 0xdc            |writel $((BAR0 + 0xf8)) 0x000000dc|"
+    "publish the table         |writel $((BAR0 + 0xfc)) 0x00000001|"
+    "device accepted it        |readl $((BAR0 + 0xfc))|0x0000000000000001"
+
+    # The window, spec 4.2.  VQ_NUM_MAX is the device's own limit; VQ_SELECT
+    # is global and contractual, so a fifth queue does not exist.
+    "VQ_NUM_MAX = VEL_VRING_NUM|readl $((BAR0 + 0x104))|0x0000000000000100"
+    "VQ_SELECT = 0             |writel $((BAR0 + 0x100)) 0x00000000|"
+    "VQ_SELECT reads back 0    |readl $((BAR0 + 0x100))|0x0000000000000000"
+    "VQ_SELECT = 4 refused     |writel $((BAR0 + 0x100)) 0x00000004|"
+    "queue 0 still selected    |readl $((BAR0 + 0x100))|0x0000000000000000"
+    "write to RO VQ_NUM_MAX    |writel $((BAR0 + 0x104)) 0xdeadbeef|"
+    "VQ_NUM_MAX survived that  |readl $((BAR0 + 0x104))|0x0000000000000100"
+
+    # Program queue 0 in the order section 4.2 fixes: addresses, VQ_NUM,
+    # VQ_MSIX_VECTOR, then VQ_ENABLE last.
+    "VQ_DESC_LO                |writel $((BAR0 + 0x110)) 0x01210000|"
+    "VQ_DESC_HI                |writel $((BAR0 + 0x114)) 0x00000000|"
+    "VQ_AVAIL_LO               |writel $((BAR0 + 0x118)) 0x01200000|"
+    "VQ_AVAIL_HI               |writel $((BAR0 + 0x11c)) 0x00000000|"
+    "VQ_USED_LO                |writel $((BAR0 + 0x120)) 0x01220000|"
+    "VQ_USED_HI                |writel $((BAR0 + 0x124)) 0x00000000|"
+    "VQ_NUM = 256              |writel $((BAR0 + 0x108)) 0x00000100|"
+    "VQ_MSIX_VECTOR = 1        |writel $((BAR0 + 0x128)) 0x00000001|"
+    "VQ_AVAIL_LO reads back    |readl $((BAR0 + 0x118))|0x0000000001200000"
+    "VQ_NUM reads back         |readl $((BAR0 + 0x108))|0x0000000000000100"
+    "not enabled yet           |readl $((BAR0 + 0x10c))|0x0000000000000000"
+
+    # Enabling sweeps the ring at once (spec 4.2).  It is empty, so nothing
+    # is counted -- but the read went out over the PCI DMA space, which is
+    # what proves the address the driver published is reachable.
+    "VQ_ENABLE = 1             |writel $((BAR0 + 0x10c)) 0x00000001|"
+    "queue 0 is enabled        |readl $((BAR0 + 0x10c))|0x0000000000000001"
+    "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
+    "no heads swept yet        |readl $((BAR0 + 0xa8))|0x0000000000000000"
+
+    # A ring under description is frozen once enabled: section 4.2 puts
+    # VQ_ENABLE last precisely so the description is complete and then still.
+    "VQ_NUM write while enabled|writel $((BAR0 + 0x108)) 0x00000008|"
+    "VQ_NUM unchanged          |readl $((BAR0 + 0x108))|0x0000000000000100"
+
+    # Two heads published by the host, then the doorbell that announces them.
+    # The value is the notifyid, never the queue index -- there is no
+    # VQ_NOTIFYID register, and this is what makes the walk above load-bearing.
+    "avail.idx = 2             |write 0x1200002 2 0x0200|"
+    "avail.ring[0] = 5         |write 0x1200004 2 0x0500|"
+    "avail.ring[1] = 6         |write 0x1200006 2 0x0600|"
+    "read of DOORBELL is WO    |readl $((BAR0 + 0x34))|0x00000000ffffffff"
+    "ring the doorbell, id 0   |writel $((BAR0 + 0x34)) 0x00000000|"
+    "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
+    "CNT_DB_RX = 1             |readl $((BAR0 + 0x98))|0x0000000000000001"
+    "CNT_DESC = 2              |readl $((BAR0 + 0xa8))|0x0000000000000002"
+
+    # The sweep advanced its index, so a second doorbell with nothing new
+    # finds nothing new.  A model that re-read from zero would count four.
+    "doorbell again, nothing   |writel $((BAR0 + 0x34)) 0x00000000|"
+    "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
+    "CNT_DB_RX = 2             |readl $((BAR0 + 0x98))|0x0000000000000002"
+    "CNT_DESC still 2          |readl $((BAR0 + 0xa8))|0x0000000000000002"
+
+    # A doorbell that names no queue, and one that names a queue nobody
+    # enabled: both counted, neither swept.  CNT_DB_RX is the truth about
+    # what the driver did, not about what the device made of it (annex D.6).
+    "doorbell for notifyid 99  |writel $((BAR0 + 0x34)) 0x00000063|"
+    "doorbell for queue 3      |writel $((BAR0 + 0x34)) 0x00000003|"
+    "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
+    "CNT_DB_RX = 4             |readl $((BAR0 + 0x98))|0x0000000000000004"
+    "CNT_DESC still 2          |readl $((BAR0 + 0xa8))|0x0000000000000002"
+
+    # Annex D.3: RESET purges the window and invalidates the table.  This is
+    # what makes the driver reprogram both on every start -- and what makes a
+    # recovery that forgets to do so fail loudly instead of going quiet.
+    "assert RESET              |writel $((BAR0 + 0x1c)) 0x00000001|"
+    "queue 0 is disabled       |readl $((BAR0 + 0x10c))|0x0000000000000000"
+    "RSC_VALID cleared with it |readl $((BAR0 + 0xfc))|0x0000000000000000"
+    "the ring addresses stay   |readl $((BAR0 + 0x118))|0x0000000001200000"
+    "doorbell after reset      |writel $((BAR0 + 0x34)) 0x00000000|"
+    "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
+    "counted but not swept     |readl $((BAR0 + 0xa8))|0x0000000000000002"
 )
 
 commands=("${SETUP[@]}")
