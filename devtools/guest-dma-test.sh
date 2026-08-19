@@ -92,18 +92,27 @@ fi
 # The device memory still holds the reset pattern, so this reads a value the
 # driver could not have produced.  Word k of the transfer must equal the
 # device offset it came from.
+#
+# Above the firmware, though.  Since step 6 the driver boots the device at
+# probe, and the image's single PT_LOAD declares p_memsz = 0x20000 to cover
+# the trace ring (spec 6.6, and the step 6 entry of section 16): the core
+# copies 0xec bytes of file data and memset_io()s the rest, so device memory
+# below 128 KiB is zeroed before this test ever runs.  The reset pattern is
+# only an oracle outside what the loader touches.
 
-if dma d2h 0x2000 0x8000 64; then
+PAT_OFF=0x40000
+
+if dma d2h "$PAT_OFF" 0x8000 64; then
     WORDS=$(dd if="$DBG/dma_pool" bs=1 skip=$((0x8000)) count=16 2>/dev/null | od -An -tx4)
     W0=$(echo "$WORDS" | awk '{ print $1 }')
     W1=$(echo "$WORDS" | awk '{ print $2 }')
-    if [ "$W0" = "00002000" ] && [ "$W1" = "00002004" ]; then
+    if [ "$W0" = "00040000" ] && [ "$W1" = "00040004" ]; then
         pass "D2H against the reset pattern (words $W0 $W1)"
     else
-        fail "D2H returned $W0 $W1, expected 00002000 00002004"
+        fail "D2H returned $W0 $W1, expected 00040000 00040004"
     fi
 else
-    fail "D2H of 64 bytes at 0x2000 was refused"
+    fail "D2H of 64 bytes at $PAT_OFF was refused"
 fi
 
 # --------------------------------------------------------- 3. H2D, then ----
