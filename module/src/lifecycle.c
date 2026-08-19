@@ -112,7 +112,7 @@ static int velocitor_pci_probe(struct pci_dev *dev,
     return err;
 
   // Initialize vring structures.
-  if ((err = velocitor_vrings_initialize(dev)))
+  if ((err = velocitor_vring_initialize(dev)))
     return err;
 
   // Register IRQ handler (request_irq())

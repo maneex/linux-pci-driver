@@ -60,6 +60,8 @@ static irqreturn_t irq_error_event(int irq, void *data) {
 int velocitor_irq_initialize(struct pci_dev *dev) {
   int err = 0;
 
+  // FIXME ! IRQ Affinity.
+
   if ((err = pci_alloc_irq_vectors(dev, VEL_MSIX_VECTORS, VEL_MSIX_VECTORS,
                                    PCI_IRQ_MSIX)) < 0)
     return err;
@@ -67,18 +69,16 @@ int velocitor_irq_initialize(struct pci_dev *dev) {
   if ((err = devm_add_action_or_reset(&dev->dev, velocitor_irq_release, dev)))
     return err;
 
-  // FIXME! IRQ handler affinity ?
-  // FIXME! Threaded IRQ ?
   if ((err = devm_request_irq(&dev->dev, pci_irq_vector(dev, 0),
                               irq_config_event, 0, "velocitor-cfg", dev)))
     return err;
 
   struct velocitor_dev *device = pci_get_drvdata(dev);
   for (unsigned i = 0; i < VEL_VRINGS_COUNT; ++i) {
-    device->vrings[i].irq = pci_irq_vector(dev, device->vrings[i].vector);
+    device->vring.vqs[i].irq = pci_irq_vector(dev, device->vring.vqs[i].vector);
     if ((err = devm_request_irq(
-             &dev->dev, device->vrings[i].irq, irq_queue_event, 0,
-             device->vrings[i].vector_name, device->vrings + i)))
+             &dev->dev, device->vring.vqs[i].irq, irq_queue_event, 0,
+             device->vring.vqs[i].vector_name, device->vring.vqs + i)))
       return err;
   }
 

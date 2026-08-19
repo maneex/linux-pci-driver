@@ -29,8 +29,8 @@ static int velocitor_rproc_prepare(struct rproc *rproc) {
 
   // vrings.
   for (int i = 0; i < VEL_VRINGS_COUNT; ++i) {
-    mem = rproc_mem_entry_init(rproc->dev.parent, device->vrings[i].mem.cpu,
-                               device->vrings[i].mem.dma, VEL_VRING_SIZE,
+    mem = rproc_mem_entry_init(rproc->dev.parent, device->vring.vqs[i].mem.cpu,
+                               device->vring.vqs[i].mem.dma, VEL_VRING_SIZE,
                                FW_RSC_ADDR_ANY, NULL, NULL, "vdev%dvring%d",
                                i / 2, i % 2);
     if (NULL == mem)
@@ -57,7 +57,7 @@ static int velocitor_rproc_walk_rsc_table(struct velocitor_dev *device,
     for (u8 j = 0; j < vdev->num_of_vrings; ++j) {
       if (vring_index >= VEL_VRINGS_COUNT)
         return -EINVAL;
-      device->vrings[vring_index++].notifyid = vdev->vring[j].notifyid;
+      device->vring.vqs[vring_index++].notifyid = vdev->vring[j].notifyid;
     }
   }
   return VEL_VRINGS_COUNT == vring_index ? 0 : -EINVAL;
@@ -69,7 +69,7 @@ static int velocitor_rproc_start(struct rproc *rproc) {
 
   dev_info(&dev->dev, "rproc: starting");
 
-  velocitor_vrings_invalidate(dev);
+  velocitor_vring_invalidate(dev);
 
   writel(lower_32_bits(device->rproc.rsc.dma),
          device->bar0 + VEL_REG_RSC_ADDR_LO);
@@ -89,19 +89,23 @@ static int velocitor_rproc_start(struct rproc *rproc) {
                : -ETIMEDOUT;
   }
 
-  // Update generation.
-  device->rproc.generation = readl(device->bar0 + VEL_REG_GENERATION);
-
   if (VEL_FW_STATUS_RUNNING != status) {
     dev_info(&dev->dev, "rproc: unable to start remote processor");
     return -EIO;
   }
 
+  // Update generation.
+  device->rproc.generation = readl(device->bar0 + VEL_REG_GENERATION);
+
+  // Check ABI.
+  if (VEL_FW_ABI != readl(device->bar0 + VEL_REG_FW_ABI))
+    return -ENODEV;
+
   // Initialize vrings
   int err = 0;
   if ((err = velocitor_rproc_walk_rsc_table(device, rproc)))
     return err;
-  velocitor_vrings_activate(dev);
+  velocitor_vring_activate(dev);
 
   return 0;
 }

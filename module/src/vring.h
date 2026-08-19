@@ -23,11 +23,10 @@ struct velocitor_vring {
   struct pci_dev *dev;
   struct velocitor_dma_buf mem;
   char *vector_name;
-  bool enabled;
 };
 
-int velocitor_vrings_initialize(struct pci_dev *dev);
-void velocitor_vrings_activate(struct pci_dev *dev);
-void velocitor_vrings_invalidate(struct pci_dev *dev);
+int velocitor_vring_initialize(struct pci_dev *dev);
+void velocitor_vring_activate(struct pci_dev *dev);
+void velocitor_vring_invalidate(struct pci_dev *dev);
 
 #endif // not VELOCITOR_VRING_H
