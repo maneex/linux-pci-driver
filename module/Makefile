@@ -9,6 +9,7 @@ velocitor-y += src/dma.o
 velocitor-y += src/remoteproc.o
 velocitor-y += src/error.o
 velocitor-y += src/vring.o
+velocitor-y += src/device-trace.o
 
 ccflags-y += -I$(src)/include -I$(src)/../qemu-device/ -I$(src)/src
 # rproc_elf_* are exported but declared in the remoteproc core's private header.

@@ -122,7 +122,11 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   // Initialize non-PCI (i.e. LAN/SCSI/etc parts of the chip)
   // Enable DMA/processing engines
 
-  //
+  // Device trace.
+  if ((err = velocitor_dtrace_initialize(dev)))
+    return err;
+
+  // Start remote firmware.
   if ((err = velocitor_remoteproc_initialize(dev)))
     return err;
 

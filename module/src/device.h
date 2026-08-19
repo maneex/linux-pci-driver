@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 
 // Driver headers.
+#include "device-trace.h"
 #include "dma.h"
 #include "identity.h"
 #include "vring.h"
@@ -39,6 +40,8 @@ struct velocitor_dev {
     struct mutex lock;
     struct velocitor_vring vqs[VEL_VRINGS_COUNT];
   } vring;
+
+  struct velocitor_dtrace dtrace;
 
   struct {
     struct rproc *handle;

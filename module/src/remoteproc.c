@@ -97,8 +97,15 @@ static int velocitor_rproc_start(struct rproc *rproc) {
   // Update generation.
   device->rproc.generation = readl(device->bar0 + VEL_REG_GENERATION);
 
+  // Where the firmware put its trace ring (spec 6.6).  Readable only now:
+  // before the load, device memory still holds the reset pattern.
+  device->dtrace.da =
+      readl(device->bar2 + VEL_FW_HDR_DA + VEL_FW_HDR_OFF_TRACE_DA);
+
   // Check ABI.
-  if (VEL_FW_ABI != readl(device->bar0 + VEL_REG_FW_ABI))
+  if ((VEL_FW_ABI != readl(device->bar0 + VEL_REG_FW_ABI)) ||
+      (VEL_TRACE_ENTRY !=
+       readl(device->bar2 + device->dtrace.da + VEL_TRACE_OFF_ENTRY_SIZE)))
     return -ENODEV;
 
   // Initialize vrings
