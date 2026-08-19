@@ -227,25 +227,37 @@ CHECKS=(
     "publish it                |writel $((BAR0 + 0xfc)) 0x00000001|"
     "device refused it         |readl $((BAR0 + 0xfc))|0x0000000000000000"
     "ERR_CODE = 1 (bad desc)   |readl $((BAR0 + 0x50))|0x0000000000000001"
+    "ERR_NOTIFYID = none       |readl $((BAR0 + 0x5c))|0x00000000ffffffff"
+    "ERR_GENERATION = 0        |readl $((BAR0 + 0x64))|0x0000000000000000"
+    "nothing dropped yet       |readl $((BAR0 + 0x68))|0x0000000000000000"
 
     # Version 2 does not exist -- the remoteproc core would not accept it
-    # either, so the two sides agree on what a table is.
+    # either, so the two sides agree on what a table is.  Vector 5 from the
+    # refusal above has not been acknowledged, so this second error does not
+    # overwrite the first: the block keeps the root cause and ERR_DROPPED
+    # counts what followed (spec 4.4).
     "RSC_LEN = 16              |writel $((BAR0 + 0xf8)) 0x00000010|"
     "make the table version 2  |write 0x1100000 4 0x02000000|"
     "publish it                |writel $((BAR0 + 0xfc)) 0x00000001|"
     "device refused it         |readl $((BAR0 + 0xfc))|0x0000000000000000"
-    "ERR_CODE = 1 (bad desc)   |readl $((BAR0 + 0x50))|0x0000000000000001"
+    "first ERR_CODE survived   |readl $((BAR0 + 0x50))|0x0000000000000001"
+    "ERR_DROPPED = 1           |readl $((BAR0 + 0x68))|0x0000000000000001"
 
     # The 42-bit trap guards the control path too, not only the data path.
+    # Acknowledge first, the way a driver does before retrying, or the block
+    # would still be holding the error from two cases ago.
+    "ack vector 5              |writel $((BAR0 + 0x30)) 0x00000020|"
     "restore version 1         |write 0x1100000 4 0x01000000|"
     "RSC_ADDR_HI = 2^42 >> 32  |writel $((BAR0 + 0xf4)) 0x00000400|"
     "publish it                |writel $((BAR0 + 0xfc)) 0x00000001|"
     "device refused it         |readl $((BAR0 + 0xfc))|0x0000000000000000"
     "ERR_CODE = 4 (DMA width)  |readl $((BAR0 + 0x50))|0x0000000000000004"
+    "ERR_DROPPED stayed at 1   |readl $((BAR0 + 0x68))|0x0000000000000001"
 
     # Firmware life cycle, spec 4.1, 6.1, 6.5 and 6.6.  Put the table back
     # where the device can read it first, so that releasing RESET is the
     # sequence section 6.1 prescribes and not a second thing under test.
+    "ack vector 5              |writel $((BAR0 + 0x30)) 0x00000020|"
     "clear the injection bits  |writel $((BAR0 + 0x40)) 0x00000000|"
     "RSC_ADDR_HI back in range |writel $((BAR0 + 0xf4)) 0x00000000|"
     "publish the table         |writel $((BAR0 + 0xfc)) 0x00000001|"

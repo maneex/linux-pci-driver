@@ -6,7 +6,7 @@
  * of the contract described there (spec section 0.6); annex D lists the
  * obligations that do not follow from the section text.
  *
- * SCOPE IMPLEMENTED TODAY -- steps 2 and 3 of spec section 13:
+ * SCOPE IMPLEMENTED TODAY -- steps 2 to 6 of spec section 13:
  *
  *   - PCI identity and capability layout      (spec 2.1, 3)
  *   - the three BARs, with contractual type and size, so lspci and the
@@ -20,9 +20,14 @@
  *     the WIN_BASE read-back                  (spec 3.1, 9)
  *   - the bring-up DMA block, asynchronous, with the 42-bit address trap
  *                                             (spec 4.3, 9.1, annex D.1/D.2)
- *   - the shadow resource table registers, and the shallow check the model
- *     makes of the table when RSC_VALID goes up
- *                                             (spec 4.2, 6.4)
+ *   - the shadow resource table registers, the shallow check the model makes
+ *     of the table when RSC_VALID goes up, and the walk that learns which
+ *     notifyid names which queue      (spec 4.2, 6.4, annex D.4)
+ *   - the queue configuration window, DOORBELL, and the sweep of the
+ *     available ring at activation and at every doorbell
+ *                                             (spec 4.1, 4.2, annex D.2)
+ *   - the qualified error block in full, ERR_DROPPED included
+ *                                             (spec 4.4)
  *   - the firmware life cycle: RESET, the firmware header check that makes
  *     the load falsifiable, FW_STATUS through 1 and 2, FW_ABI, GENERATION
  *     and an initialised trace ring
@@ -33,11 +38,19 @@
  *                                             (spec 4)
  *
  * Everything else in BAR0 answers as reserved and logs under LOG_UNIMP with
- * the spec section that will implement it.  Nothing here starts a firmware
- * or moves data outside the bring-up block.  Of the qualified error block of
- * section 4.4 only ERR_CODE and ERR_INFO_* exist, filled by the DMA path;
- * an injected firmware crash still raises vector 5 without an ERR_CODE to go
- * with it.
+ * the spec section that will implement it.
+ *
+ * WHAT THE TRANSPORT DOES NOT DO YET.  The sweep counts the heads the host
+ * published and advances its index; it consumes none of them, writes no used
+ * ring, and raises no queue vector.  Turning heads into rpmsg messages is
+ * annex D.5 and step 7, turning them into GEMM operations is section 8 and
+ * step 8.  What step 6 can honestly claim is that the doorbell arrives, the
+ * ring addresses the driver published are readable by bus mastering, and
+ * CNT_DB_RX and CNT_DESC say so.
+ *
+ * An injected firmware crash still raises vector 5 with no ERR_CODE to go
+ * with it: section 4.4 has no code for "the test asked for a crash", and
+ * inventing one would be a change to the contract rather than to the model.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -57,6 +70,36 @@
 
 #define TYPE_VELOCITOR "velocitor"
 OBJECT_DECLARE_SIMPLE_TYPE(VelocitorState, VELOCITOR)
+
+/*
+ * One queue of the configuration window, spec section 4.2.  The index is
+ * global and contractual -- VEL_VQ_CTRL_RX, VEL_VQ_CTRL_TX, VEL_VQ_ENGINE0,
+ * VEL_VQ_ENGINE1 -- not relative to the vdev it belongs to.
+ *
+ * Three of these fields do not come from the window at all.  notifyid,
+ * gfeatures and status are read out of the shadow table (annex D.4); they
+ * live here because they are per-queue facts and because keeping them next
+ * to the addresses makes it obvious which of the two sides published what.
+ */
+typedef struct VelocitorQueue {
+    /* Written through the VQ_* window by the driver */
+    uint32_t num;
+    uint32_t enable;
+    uint32_t desc_lo, desc_hi;
+    uint32_t avail_lo, avail_hi;
+    uint32_t used_lo, used_hi;
+    uint32_t msix_vector;
+
+    /* Read out of the shadow table, never written back (annex D.4) */
+    uint32_t notifyid;      /* VEL_NOTIFYID_NONE until RSC_VALID goes up  */
+    uint32_t vdev_off;      /* where this queue's vdev entry starts       */
+    uint32_t gfeatures;     /* negotiated, not offered -- spec 8.1        */
+    uint32_t vstatus;       /* virtio device status                       */
+
+    /* Where the avail ring scan got to.  32-bit for the same reason the
+     * counters are: a 16-bit field in a migration stream buys nothing. */
+    uint32_t last_avail;
+} VelocitorQueue;
 
 struct VelocitorState {
     /*< private >*/
@@ -156,9 +199,21 @@ struct VelocitorState {
     uint32_t rsc_len;
     uint32_t rsc_valid;
 
-    /* Qualified error, spec section 4.4 -- only what step 5 can raise */
+    /*
+     * Queue configuration window, spec section 4.2.  vq_select is the only
+     * register of the block that is not per-queue: it says which of the four
+     * the others act on.
+     */
+    uint32_t vq_select;
+    VelocitorQueue vq[VEL_VQ_COUNT];
+
+    /* Qualified error, spec section 4.4 */
     uint32_t err_code;
     uint32_t err_info_lo, err_info_hi;
+    uint32_t err_notifyid;
+    uint32_t err_handle;
+    uint32_t err_generation;
+    uint32_t err_dropped;
 
     /* Error injection, spec section 9 */
     uint32_t err_inject;    /* 0x040                                      */
@@ -346,14 +401,45 @@ static void velocitor_mem_fill_pattern(VelocitorState *s)
 
 /*
  * Qualify an error, spec section 4.4.  Split out from the DMA path because
- * the shadow table below reports through the same three registers without
- * having a transfer status to set.
+ * the shadow table below reports through the same registers without having a
+ * transfer status to set.
+ *
+ * ERR_DROPPED is the register the spec calls the most important of the block:
+ * it makes visible what the driver did not see.  An error is "seen" once the
+ * driver has acknowledged vector 5 -- IRQ_ACK is the only signal the host
+ * gives that it has read the block -- so while that latch is still up, a new
+ * error only increments the counter.
+ *
+ * Which of the two survives is not settled by the spec, and it matters: the
+ * model keeps the *first*.  A driver arriving late gets the root cause plus a
+ * count of what followed, rather than the last symptom of a cascade with the
+ * cause overwritten.  A decision for section 16.
  */
-static void velocitor_error_set(VelocitorState *s, uint32_t code, uint64_t info)
+static void velocitor_error_qualify(VelocitorState *s, uint32_t code,
+                                    uint64_t info, uint32_t notifyid,
+                                    uint32_t handle)
 {
+    if (s->irq_status & (1u << VEL_IRQ_VEC_ERROR)) {
+        s->err_dropped++;
+        return;
+    }
+
     s->err_code = code;
     s->err_info_lo = (uint32_t)info;
     s->err_info_hi = (uint32_t)(info >> 32);
+    s->err_notifyid = notifyid;
+    s->err_handle = handle;
+    s->err_generation = s->generation;
+}
+
+/*
+ * The common case: an error that belongs to no queue and no allocation.  The
+ * two defaults are contractual (spec 4.4) -- 0xFFFFFFFF rather than 0 for the
+ * notifyid, because 0 is a perfectly ordinary vring.
+ */
+static void velocitor_error_set(VelocitorState *s, uint32_t code, uint64_t info)
+{
+    velocitor_error_qualify(s, code, info, VEL_NOTIFYID_NONE, 0);
 }
 
 static void velocitor_dma_fail(VelocitorState *s, uint32_t code, uint64_t info)
@@ -430,6 +516,13 @@ static void velocitor_dma_start(VelocitorState *s, uint32_t ctl)
 /* ------------------------------------------------------------------ */
 /* Firmware life cycle -- spec sections 4.1, 6.1, 6.5 and 6.6          */
 /* ------------------------------------------------------------------ */
+
+/*
+ * Declared here rather than moved: the queue window belongs after the shadow
+ * table it reads the notifyids from, but RESET has to purge it (annex D.3),
+ * and RESET is part of the life cycle below.
+ */
+static void velocitor_vq_purge(VelocitorState *s);
 
 /*
  * Simulated boot time, virtual clock.  Long enough next to the DMA latency
@@ -552,8 +645,14 @@ static void velocitor_reset_write(VelocitorState *s, uint32_t val)
     s->reset = val & 1;
 
     if (s->reset) {
-        /* Annex D.3: deferred work goes before anything else. */
+        /* Annex D.3, in the order it prescribes: deferred work first, then
+         * the queues, then the shadow table, then the status.  Dropping
+         * RSC_VALID here is what makes the driver's re-publication on the
+         * next start a requirement rather than a courtesy -- and the table
+         * it named belongs to a boot that is over (spec 6.5). */
         timer_del(s->boot_timer);
+        velocitor_vq_purge(s);
+        s->rsc_valid = 0;
         s->fw_status = VEL_FW_STATUS_RESET;
         s->fw_abi = 0;
         s->trace_da = 0;
@@ -589,6 +688,28 @@ static void velocitor_reset_write(VelocitorState *s, uint32_t val)
 #define VEL_RSC_HDR_SIZE  16u
 
 /*
+ * The rest of the layout, spec section 6.3.  These are the kernel's
+ * struct fw_rsc_hdr and struct fw_rsc_vdev, spelled as offsets because the
+ * model cannot include a Linux header -- and because this is a remoteproc
+ * contract, not a device one, so it has no business in velocitor_hw.h, which
+ * says of itself that it depends on nothing.
+ *
+ * firmware/mkfw.c writes the same layout from the same source; the driver
+ * reads it through the structures themselves.  Three spellings of one truth
+ * is one too many, and the day it drifts, the doorbell stops routing -- which
+ * is why the walk below refuses to guess and says what it found.
+ */
+#define VEL_RSC_TYPE_VDEV        3u    /* enum fw_resource_type              */
+#define VEL_RSC_OFF_ENTRIES      16u   /* offset[] follows ver/num/reserved   */
+#define VEL_RSC_BODY             4u    /* the body follows fw_rsc_hdr.type    */
+
+#define VEL_VDEV_OFF_GFEATURES   12u
+#define VEL_VDEV_OFF_STATUS      20u   /* status, num_of_vrings, reserved[2]  */
+#define VEL_VDEV_OFF_VRING       24u
+#define VEL_VDEV_VRING_STRIDE    20u   /* da, align, num, notifyid, pa        */
+#define VEL_VDEV_VRING_NOTIFYID  12u
+
+/*
  * Read one 32-bit word out of the shadow table.
  *
  * Through the PCI DMA address space like every other host access (annex
@@ -599,6 +720,18 @@ static void velocitor_reset_write(VelocitorState *s, uint32_t val)
  *
  * Step 7 reads the notifyids through here, step 8 the negotiated features.
  */
+/*
+ * Does a word at this offset lie inside the table the driver published?
+ * Separate from the read below because the two answer different questions:
+ * this one is "is there anything there to look at", which the walk asks of a
+ * table it is merely inspecting, while the read reports a failure the driver
+ * is entitled to see qualified.
+ */
+static bool velocitor_rsc_in_table(VelocitorState *s, uint32_t off)
+{
+    return (uint64_t)off + sizeof(uint32_t) <= s->rsc_len;
+}
+
 static bool velocitor_rsc_read32(VelocitorState *s, uint32_t off, uint32_t *val)
 {
     PCIDevice *pdev = PCI_DEVICE(s);
@@ -622,6 +755,90 @@ static bool velocitor_rsc_read32(VelocitorState *s, uint32_t off, uint32_t *val)
 
     *val = le32_to_cpu(raw);
     return true;
+}
+
+/*
+ * Learn which notifyid names which queue, spec section 4.2 and annex D.4.
+ *
+ * The notifyids are assigned by the remoteproc core and written into the
+ * table by rproc_alloc_vring(); the device reads them, never writes them.
+ * They are available from RSC_VALID -- earlier than gfeatures, which the
+ * subdevices only negotiate later (spec 6.4) -- and the doorbell carries
+ * nothing else, so without this walk DOORBELL cannot be routed at all.
+ *
+ * The global queue index is the contract of section 4.2: vdevs in table
+ * order, two vrings each, so vdev0's rings are queues 0 and 1 and vdev1's
+ * are 2 and 3.  That is the same arithmetic the driver does on its side,
+ * which is the point -- if the two disagree, they disagree loudly here
+ * rather than quietly at the first interrupt.
+ *
+ * A table the model cannot walk does not invalidate it: the shallow ver/num
+ * check above is what RSC_VALID answers for.  What an unwalkable table costs
+ * is the routing, and the log line says so before the first doorbell rather
+ * than after it.
+ */
+static void velocitor_rsc_scan_vdevs(VelocitorState *s, uint32_t num)
+{
+    unsigned q = 0;
+    unsigned i;
+
+    for (i = 0; i < VEL_VQ_COUNT; i++) {
+        s->vq[i].notifyid = VEL_NOTIFYID_NONE;
+        s->vq[i].vdev_off = 0;
+    }
+
+    for (i = 0; i < num && q < VEL_VQ_COUNT; i++) {
+        uint32_t entry, type, body, packed, nvrings, j;
+
+        /*
+         * Walking off the end of the table is not an error to qualify: the
+         * table has already been accepted, and this is the model inspecting
+         * it, not performing an operation the driver is waiting on.  Only a
+         * read that genuinely fails -- the 42-bit trap, a fault -- latches
+         * the block, which velocitor_rsc_read32() does on its own.
+         */
+        if (!velocitor_rsc_in_table(s, VEL_RSC_OFF_ENTRIES + 4 * i) ||
+            !velocitor_rsc_read32(s, VEL_RSC_OFF_ENTRIES + 4 * i, &entry)) {
+            break;
+        }
+        if (!velocitor_rsc_in_table(s, entry) ||
+            !velocitor_rsc_read32(s, entry, &type)) {
+            break;
+        }
+
+        if (type != VEL_RSC_TYPE_VDEV) {
+            continue;
+        }
+
+        body = entry + VEL_RSC_BODY;
+        if (!velocitor_rsc_in_table(s, body + VEL_VDEV_OFF_STATUS) ||
+            !velocitor_rsc_read32(s, body + VEL_VDEV_OFF_STATUS, &packed)) {
+            break;
+        }
+
+        /* status and num_of_vrings are two bytes of one word (spec 6.3). */
+        nvrings = (packed >> 8) & 0xFFu;
+
+        for (j = 0; j < nvrings && q < VEL_VQ_COUNT; j++, q++) {
+            uint32_t off = body + VEL_VDEV_OFF_VRING +
+                           j * VEL_VDEV_VRING_STRIDE +
+                           VEL_VDEV_VRING_NOTIFYID;
+
+            if (!velocitor_rsc_in_table(s, off) ||
+                !velocitor_rsc_read32(s, off, &s->vq[q].notifyid)) {
+                s->vq[q].notifyid = VEL_NOTIFYID_NONE;
+                return;
+            }
+            s->vq[q].vdev_off = body;
+        }
+    }
+
+    if (q != VEL_VQ_COUNT) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: shadow resource table describes %u vring(s), "
+                      "expected %u (spec 6.3) -- DOORBELL will not route for "
+                      "the rest\n", q, VEL_VQ_COUNT);
+    }
 }
 
 /*
@@ -676,6 +893,412 @@ static void velocitor_rsc_publish(VelocitorState *s, uint32_t val)
     }
 
     s->rsc_valid = 1;
+
+    /* Annex D.4: the notifyids become readable at exactly this moment. */
+    velocitor_rsc_scan_vdevs(s, num);
+}
+
+/* ------------------------------------------------------------------ */
+/* Queue configuration window -- spec section 4.2, annex D.2 and D.4   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Split ring layout, virtio 1.1 section 2.6.  Only the available ring is
+ * spelled out here: the model reads the driver's index and the heads it
+ * published, and nothing else yet.  The three ring addresses arrive through
+ * their own registers (spec 4.2), so the model never computes a layout --
+ * which is exactly why the window carries three addresses instead of one.
+ */
+#define VEL_AVAIL_OFF_IDX    2u   /* flags, then idx                        */
+#define VEL_AVAIL_OFF_RING   4u   /* then the array of 16-bit heads         */
+
+/*
+ * Read from host memory on behalf of a queue.
+ *
+ * Through the PCI DMA address space and behind the 42-bit trap, like every
+ * other host access (annex D.2).  The queue is named in the qualified error
+ * because that is the whole point of ERR_NOTIFYID: on the data path an
+ * address that overflows says nothing on its own, and "which ring was it"
+ * is the question the driver will actually ask.
+ */
+static bool velocitor_vq_host_read(VelocitorState *s, unsigned q,
+                                   uint64_t iova, void *buf, size_t len)
+{
+    PCIDevice *pdev = PCI_DEVICE(s);
+
+    if (iova + len > (1ULL << VEL_DMA_BITS)) {
+        velocitor_error_qualify(s, VEL_ERR_DMA_WIDTH, iova,
+                                s->vq[q].notifyid, 0);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return false;
+    }
+
+    if (pci_dma_read(pdev, iova, buf, len) != MEMTX_OK) {
+        velocitor_error_qualify(s, VEL_ERR_DMA_WIDTH, iova,
+                                s->vq[q].notifyid, 0);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return false;
+    }
+
+    s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_DMA_RD)]++;
+    s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_BYTES_RD_LO)] += len;
+    return true;
+}
+
+/*
+ * Re-read what the host negotiated for this queue's vdev, out of the shadow
+ * table (annex D.4).
+ *
+ * Annex D.4 says gfeatures is available "from VQ_ENABLE = 1 on one of the
+ * vdev's queues".  That was written for a driver programming the window
+ * *after* rproc_boot() returns, when the subdevices have already negotiated.
+ * The driver programs the window inside ops->start() instead -- it has to,
+ * or a crash recovery would never reprogram it -- and at that moment the
+ * negotiation has not happened: the table still holds zeroes.
+ *
+ * So the model reads them at every use rather than once at activation.  It
+ * costs two DMA reads per doorbell and it is always current, which is the
+ * property that matters: parsing an avail ring according to features that
+ * were merely offered is exactly the confusion annex D.4 warns against.
+ */
+static void velocitor_vq_refresh_negotiation(VelocitorState *s, unsigned q)
+{
+    uint32_t packed;
+
+    if (!s->rsc_valid || s->vq[q].vdev_off == 0) {
+        return;
+    }
+
+    velocitor_rsc_read32(s, s->vq[q].vdev_off + VEL_VDEV_OFF_GFEATURES,
+                         &s->vq[q].gfeatures);
+    if (velocitor_rsc_read32(s, s->vq[q].vdev_off + VEL_VDEV_OFF_STATUS,
+                             &packed)) {
+        s->vq[q].vstatus = packed & 0xFFu;
+    }
+}
+
+/*
+ * Sweep the available ring of one queue.
+ *
+ * Called from the doorbell, and from VQ_ENABLE going up -- the second is not
+ * an optimisation.  Spec 4.2: virtio_rpmsg_bus fills its receive buffers and
+ * kicks during its own probe, which historically happened before the window
+ * was programmed, so that first doorbell was lost by construction.  With the
+ * window programmed from ops->start() the kick now arrives on an enabled
+ * queue, but the sweep stays: it costs one DMA read of an empty ring, and it
+ * is what keeps the contract true for any driver, not just this one.
+ *
+ * What the sweep does *not* do yet is consume anything.  Turning heads into
+ * rpmsg messages is annex D.5 and step 7; turning them into GEMM operations
+ * is section 8 and step 8.  Counting them is what step 6 can honestly claim,
+ * and it is enough to prove the whole path: the driver's kick reached the
+ * device, the ring addresses it published are readable by bus mastering, and
+ * CNT_DESC says how many heads were there.
+ *
+ * last_avail advances all the same.  Leaving it behind would re-count the
+ * same heads at every doorbell and make the counter lie, and a counter that
+ * lies is worse here than one that is merely incomplete (annex D.6).
+ */
+static void velocitor_vq_sweep(VelocitorState *s, unsigned q)
+{
+    VelocitorQueue *vq = &s->vq[q];
+    uint64_t avail = ((uint64_t)vq->avail_hi << 32) | vq->avail_lo;
+    uint16_t idx, pending, i;
+    uint16_t raw;
+
+    if (!vq->enable) {
+        return;
+    }
+
+    velocitor_vq_refresh_negotiation(s, q);
+
+    if (!velocitor_vq_host_read(s, q, avail + VEL_AVAIL_OFF_IDX,
+                                &raw, sizeof(raw))) {
+        return;
+    }
+    idx = le16_to_cpu(raw);
+
+    pending = idx - (uint16_t)vq->last_avail;
+    if (pending == 0) {
+        return;
+    }
+
+    if (pending > vq->num) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: queue %u published %u heads into a ring of "
+                      "%u (spec 8.3) -- clamped\n", q, pending, vq->num);
+        pending = vq->num;
+    }
+
+    for (i = 0; i < pending; i++) {
+        uint16_t slot = ((uint16_t)vq->last_avail + i) % vq->num;
+
+        if (!velocitor_vq_host_read(s, q,
+                                    avail + VEL_AVAIL_OFF_RING + 2u * slot,
+                                    &raw, sizeof(raw))) {
+            return;
+        }
+        s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_DESC)]++;
+    }
+
+    vq->last_avail = (uint16_t)(vq->last_avail + pending);
+
+    qemu_log_mask(LOG_UNIMP,
+                  "velocitor: queue %u has %u available head(s), gfeatures "
+                  "0x%08x, virtio status 0x%02x -- counted, not consumed; "
+                  "rpmsg is annex D.5 and the data plane is spec 8\n",
+                  q, pending, vq->gfeatures, vq->vstatus);
+}
+
+/*
+ * Forget everything the driver said about the queues.
+ *
+ * Annex D.3 point 3 and spec 6.5 point 1: a reset and a crash both put every
+ * VQ_ENABLE back to zero and purge the queue state.  last_avail goes with
+ * them, and that is the half that matters -- the driver zeroes the ring
+ * memory at each start, so a device that kept its index would resume in the
+ * middle of a ring that has restarted at zero, and consume the previous
+ * generation's heads.  The same ABA section 6.5 fights on the host side.
+ *
+ * The notifyids survive: they belong to the shadow table, which has its own
+ * validity bit, and RSC_VALID is invalidated in the same breath.
+ */
+static void velocitor_vq_purge(VelocitorState *s)
+{
+    unsigned q;
+
+    for (q = 0; q < VEL_VQ_COUNT; q++) {
+        s->vq[q].enable = 0;
+        s->vq[q].last_avail = 0;
+        s->vq[q].gfeatures = 0;
+        s->vq[q].vstatus = 0;
+    }
+}
+
+/*
+ * VQ_ENABLE, the last register of the sequence and the handoff contract of
+ * spec section 5: not FW_STATUS, not DRIVER_OK -- this.  Before it, the model
+ * must not touch the queue; after it, the ring is the device's to read.
+ *
+ * The checks are the ones the driver cannot make for itself.  A ring of zero
+ * or oversized descriptors, or an address left at zero, means the window was
+ * programmed out of order -- section 4.2 fixes that order precisely so the
+ * activation is the commit point of a complete description.
+ */
+static void velocitor_vq_enable(VelocitorState *s, unsigned q, uint32_t val)
+{
+    VelocitorQueue *vq = &s->vq[q];
+
+    if (!(val & 1)) {
+        vq->enable = 0;
+        vq->last_avail = 0;
+        return;
+    }
+
+    if (vq->enable) {
+        return;
+    }
+
+    if (vq->num == 0 || vq->num > VEL_VRING_NUM) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: queue %u enabled with VQ_NUM = %u, must be "
+                      "1..%u (spec 4.2) -- ignored\n",
+                      q, vq->num, VEL_VRING_NUM);
+        return;
+    }
+
+    if ((vq->desc_lo | vq->desc_hi) == 0 ||
+        (vq->avail_lo | vq->avail_hi) == 0 ||
+        (vq->used_lo | vq->used_hi) == 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: queue %u enabled with a ring address still "
+                      "at zero (spec 4.2 fixes the order: addresses, VQ_NUM, "
+                      "VQ_MSIX_VECTOR, then VQ_ENABLE) -- ignored\n", q);
+        return;
+    }
+
+    if (vq->msix_vector >= VEL_MSIX_VECTORS) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: queue %u enabled with MSI-X vector %u, only "
+                      "%u exist (spec 3.3) -- ignored\n",
+                      q, vq->msix_vector, VEL_MSIX_VECTORS);
+        return;
+    }
+
+    if (!s->rsc_valid || vq->notifyid == VEL_NOTIFYID_NONE) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: queue %u enabled with no notifyid -- the "
+                      "shadow table was not published, or does not describe "
+                      "it (spec 4.2, annex D.4); DOORBELL will not route\n", q);
+    }
+
+    vq->enable = 1;
+    velocitor_vq_sweep(s, q);
+}
+
+/*
+ * DOORBELL, spec section 4.1: the value is the notifyid of the ring the host
+ * just added to, never a queue index.  There is no VQ_NOTIFYID register on
+ * purpose (spec 4.2) -- the notifyid is already in the shadow table, and a
+ * second copy would be a second opinion.  So the routing is a lookup, and the
+ * table is where it comes from.
+ *
+ * CNT_DB_RX counts every doorbell, including the ones that route nowhere:
+ * the counter is the independent source of truth about what the driver did
+ * (annex D.6), not about what the device managed to do with it.
+ */
+static void velocitor_doorbell(VelocitorState *s, uint32_t notifyid)
+{
+    unsigned q;
+
+    s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_DB_RX)]++;
+
+    for (q = 0; q < VEL_VQ_COUNT; q++) {
+        if (s->vq[q].notifyid != notifyid) {
+            continue;
+        }
+
+        if (!s->vq[q].enable) {
+            /* Spec 4.2: activity on a queue that is not enabled is ignored,
+             * and saying so is more useful than ignoring it silently. */
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "velocitor: doorbell for notifyid %u, queue %u is "
+                          "not enabled (spec 4.2) -- ignored\n", notifyid, q);
+            return;
+        }
+
+        velocitor_vq_sweep(s, q);
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "velocitor: doorbell for notifyid %u, which names none of "
+                  "the %u queues described by the shadow table (spec 4.2)\n",
+                  notifyid, VEL_VQ_COUNT);
+}
+
+/*
+ * The window itself.  Every register except VQ_SELECT and VQ_NUM_MAX acts on
+ * the selected queue, virtio-pci style (spec 4.2).
+ */
+static uint64_t velocitor_vq_read(VelocitorState *s, hwaddr addr)
+{
+    const VelocitorQueue *vq;
+
+    if (addr == VEL_REG_VQ_SELECT) {
+        return s->vq_select;
+    }
+    if (addr == VEL_REG_VQ_NUM_MAX) {
+        return VEL_VRING_NUM;
+    }
+
+    vq = &s->vq[s->vq_select];
+
+    switch (addr) {
+    case VEL_REG_VQ_NUM:
+        return vq->num;
+    case VEL_REG_VQ_ENABLE:
+        return vq->enable;
+    case VEL_REG_VQ_DESC_LO:
+        return vq->desc_lo;
+    case VEL_REG_VQ_DESC_HI:
+        return vq->desc_hi;
+    case VEL_REG_VQ_AVAIL_LO:
+        return vq->avail_lo;
+    case VEL_REG_VQ_AVAIL_HI:
+        return vq->avail_hi;
+    case VEL_REG_VQ_USED_LO:
+        return vq->used_lo;
+    case VEL_REG_VQ_USED_HI:
+        return vq->used_hi;
+    case VEL_REG_VQ_MSIX_VECTOR:
+        return vq->msix_vector;
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "velocitor: BAR0 read at 0x%" HWADDR_PRIx
+                      " (queue configuration, spec 4.2) -- reserved, reads 0\n",
+                      addr);
+        return 0;
+    }
+}
+
+static void velocitor_vq_write(VelocitorState *s, hwaddr addr, uint32_t val)
+{
+    VelocitorQueue *vq;
+
+    if (addr == VEL_REG_VQ_SELECT) {
+        if (val >= VEL_VQ_COUNT) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "velocitor: VQ_SELECT = %u, the global queue index "
+                          "runs 0..%u (spec 4.2) -- ignored, queue %u stays "
+                          "selected\n",
+                          val, VEL_VQ_COUNT - 1, s->vq_select);
+            return;
+        }
+        s->vq_select = val;
+        return;
+    }
+
+    if (addr == VEL_REG_VQ_NUM_MAX) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: write 0x%08x to read-only VQ_NUM_MAX"
+                      " -- ignored\n", val);
+        return;
+    }
+
+    vq = &s->vq[s->vq_select];
+
+    if (addr == VEL_REG_VQ_ENABLE) {
+        velocitor_vq_enable(s, s->vq_select, val);
+        return;
+    }
+
+    /*
+     * Everything below describes the ring, and describing a ring the device
+     * is already reading is a driver bug, not a reconfiguration: section 4.2
+     * has VQ_ENABLE written last precisely so that the description is
+     * complete and then frozen.
+     */
+    if (vq->enable) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: write 0x%08x at 0x%" HWADDR_PRIx " while "
+                      "queue %u is enabled (spec 4.2) -- ignored\n",
+                      val, addr, s->vq_select);
+        return;
+    }
+
+    switch (addr) {
+    case VEL_REG_VQ_NUM:
+        vq->num = val;
+        return;
+    case VEL_REG_VQ_DESC_LO:
+        vq->desc_lo = val;
+        return;
+    case VEL_REG_VQ_DESC_HI:
+        vq->desc_hi = val;
+        return;
+    case VEL_REG_VQ_AVAIL_LO:
+        vq->avail_lo = val;
+        return;
+    case VEL_REG_VQ_AVAIL_HI:
+        vq->avail_hi = val;
+        return;
+    case VEL_REG_VQ_USED_LO:
+        vq->used_lo = val;
+        return;
+    case VEL_REG_VQ_USED_HI:
+        vq->used_hi = val;
+        return;
+    case VEL_REG_VQ_MSIX_VECTOR:
+        vq->msix_vector = val;
+        return;
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "velocitor: BAR0 write 0x%08x at 0x%" HWADDR_PRIx
+                      " (queue configuration, spec 4.2) -- reserved,"
+                      " ignored\n", val, addr);
+        return;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -700,6 +1323,12 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
      */
     if (addr >= VEL_CNT_FIRST && addr <= VEL_CNT_LAST) {
         return s->cnt_snap[VEL_CNT_INDEX(addr)];
+    }
+
+    /* The queue window is a sliding view of whichever queue VQ_SELECT
+     * names, so it dispatches on the selection, not on the offset alone. */
+    if (addr >= VEL_BLK_VQ_BASE && addr <= VEL_BLK_VQ_END) {
+        return velocitor_vq_read(s, addr);
     }
 
     switch (addr) {
@@ -756,6 +1385,14 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
         return s->err_info_lo;
     case VEL_REG_ERR_INFO_HI:
         return s->err_info_hi;
+    case VEL_REG_ERR_NOTIFYID:
+        return s->err_notifyid;
+    case VEL_REG_ERR_HANDLE:
+        return s->err_handle;
+    case VEL_REG_ERR_GENERATION:
+        return s->err_generation;
+    case VEL_REG_ERR_DROPPED:
+        return s->err_dropped;
 
     case VEL_REG_RESET:
         return s->reset;
@@ -778,6 +1415,7 @@ static uint64_t velocitor_bar0_read(void *opaque, hwaddr addr, unsigned size)
 
     case VEL_REG_DBG_DMA_CTL:
     case VEL_REG_IRQ_ACK:
+    case VEL_REG_DOORBELL:
     case VEL_REG_CNT_RESET:
     case VEL_REG_CNT_SNAP:
         /*
@@ -814,6 +1452,11 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
                       "velocitor: write 0x%08x to read-only counter"
                       " 0x%" HWADDR_PRIx " (spec 4.5) -- ignored\n",
                       (uint32_t)val, addr);
+        return;
+    }
+
+    if (addr >= VEL_BLK_VQ_BASE && addr <= VEL_BLK_VQ_END) {
+        velocitor_vq_write(s, addr, (uint32_t)val);
         return;
     }
 
@@ -888,6 +1531,10 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
         s->irq_status &= ~((uint32_t)val & VEL_IRQ_LATCHED);
         return;
 
+    case VEL_REG_DOORBELL:
+        velocitor_doorbell(s, (uint32_t)val);
+        return;
+
     case VEL_REG_ERR_INJECT_ARG:
         s->err_inject_arg = (uint32_t)val;
         return;
@@ -904,8 +1551,12 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
          */
         if (s->err_inject & VEL_ERR_INJECT_FW_CRASH) {
             /* Annex D.3 again: a crash cancels what was in flight, including
-             * a boot that had not finished. */
+             * a boot that had not finished.  Spec 6.5 point 1 adds the
+             * queues: every VQ_ENABLE goes back to zero, so the host's
+             * recovery has to reprogram the window before the device will
+             * look at a ring again. */
             timer_del(s->boot_timer);
+            velocitor_vq_purge(s);
             s->fw_status = VEL_FW_STATUS_CRASHED;
             velocitor_raise(s, VEL_IRQ_VEC_ERROR);
         }
@@ -925,6 +1576,10 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
     case VEL_REG_ERR_CODE:
     case VEL_REG_ERR_INFO_LO:
     case VEL_REG_ERR_INFO_HI:
+    case VEL_REG_ERR_NOTIFYID:
+    case VEL_REG_ERR_HANDLE:
+    case VEL_REG_ERR_GENERATION:
+    case VEL_REG_ERR_DROPPED:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "velocitor: write 0x%08x to read-only register"
                       " 0x%" HWADDR_PRIx " -- ignored\n",
@@ -1062,12 +1717,24 @@ static void velocitor_reset(DeviceState *dev)
     s->err_code = VEL_ERR_NONE;
     s->err_info_lo = 0;
     s->err_info_hi = 0;
+    s->err_notifyid = VEL_NOTIFYID_NONE;
+    s->err_handle = 0;
+    s->err_generation = 0;
+    s->err_dropped = 0;
 
     /* The shadow table belongs to a boot that is over (spec 6.5). */
     s->rsc_addr_lo = 0;
     s->rsc_addr_hi = 0;
     s->rsc_len = 0;
     s->rsc_valid = 0;
+
+    /* Annex D.3 point 3.  The whole window, not just the enables: nothing
+     * the driver said about a ring survives the device it described. */
+    s->vq_select = 0;
+    memset(s->vq, 0, sizeof(s->vq));
+    for (unsigned q = 0; q < VEL_VQ_COUNT; q++) {
+        s->vq[q].notifyid = VEL_NOTIFYID_NONE;
+    }
 
     s->win_base = 0;
     s->win_pending = 0;
@@ -1096,10 +1763,33 @@ static void velocitor_reset(DeviceState *dev)
     msix_reset(PCI_DEVICE(s));
 }
 
+static const VMStateDescription vmstate_velocitor_queue = {
+    .name = "velocitor/queue",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(num, VelocitorQueue),
+        VMSTATE_UINT32(enable, VelocitorQueue),
+        VMSTATE_UINT32(desc_lo, VelocitorQueue),
+        VMSTATE_UINT32(desc_hi, VelocitorQueue),
+        VMSTATE_UINT32(avail_lo, VelocitorQueue),
+        VMSTATE_UINT32(avail_hi, VelocitorQueue),
+        VMSTATE_UINT32(used_lo, VelocitorQueue),
+        VMSTATE_UINT32(used_hi, VelocitorQueue),
+        VMSTATE_UINT32(msix_vector, VelocitorQueue),
+        VMSTATE_UINT32(notifyid, VelocitorQueue),
+        VMSTATE_UINT32(vdev_off, VelocitorQueue),
+        VMSTATE_UINT32(gfeatures, VelocitorQueue),
+        VMSTATE_UINT32(vstatus, VelocitorQueue),
+        VMSTATE_UINT32(last_avail, VelocitorQueue),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_velocitor = {
     .name = "velocitor",
-    .version_id = 7,
-    .minimum_version_id = 7,
+    .version_id = 8,
+    .minimum_version_id = 8,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, VelocitorState),
         VMSTATE_UINT32(scratch, VelocitorState),
@@ -1117,9 +1807,16 @@ static const VMStateDescription vmstate_velocitor = {
         VMSTATE_UINT32(rsc_addr_hi, VelocitorState),
         VMSTATE_UINT32(rsc_len, VelocitorState),
         VMSTATE_UINT32(rsc_valid, VelocitorState),
+        VMSTATE_UINT32(vq_select, VelocitorState),
+        VMSTATE_STRUCT_ARRAY(vq, VelocitorState, VEL_VQ_COUNT, 1,
+                             vmstate_velocitor_queue, VelocitorQueue),
         VMSTATE_UINT32(err_code, VelocitorState),
         VMSTATE_UINT32(err_info_lo, VelocitorState),
         VMSTATE_UINT32(err_info_hi, VelocitorState),
+        VMSTATE_UINT32(err_notifyid, VelocitorState),
+        VMSTATE_UINT32(err_handle, VelocitorState),
+        VMSTATE_UINT32(err_generation, VelocitorState),
+        VMSTATE_UINT32(err_dropped, VelocitorState),
         VMSTATE_UINT32(irq_status, VelocitorState),
         VMSTATE_UINT32(irq_mask, VelocitorState),
         VMSTATE_UINT32(reset, VelocitorState),

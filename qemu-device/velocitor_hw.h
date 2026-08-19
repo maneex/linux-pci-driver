@@ -63,6 +63,7 @@
 #define VEL_VQ_CTRL_TX      1u
 #define VEL_VQ_ENGINE0      2u
 #define VEL_VQ_ENGINE1      3u
+#define VEL_VQ_COUNT        4u            /* two vdevs of two vrings, 6.3  */
 
 /* rpmsg */
 #define VEL_RPMSG_NS_ADDR   53u
@@ -305,6 +306,14 @@
 #define VEL_ERR_INJECT_WIN_IGNORE (1u << 6)
 #define VEL_ERR_INJECT_ENG1_STALL (1u << 7)
 #define VEL_ERR_INJECT_STALE_GEN  (1u << 8)
+
+/*
+ * ERR_NOTIFYID when the error belongs to no queue, section 4.4.  Spelled out
+ * because the driver compares against it: a notifyid of 0 is a perfectly
+ * ordinary vring -- the first one the core allocates -- so "no queue" cannot
+ * be the zero the register would otherwise hold.
+ */
+#define VEL_NOTIFYID_NONE   0xFFFFFFFFu
 
 /* FW_STATUS values, section 4.1 */
 #define VEL_FW_STATUS_RESET     0u
