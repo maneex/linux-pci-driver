@@ -39,6 +39,7 @@ struct velocitor_dev {
 
   struct {
     struct rproc *handle;
+    u32 generation;
     struct velocitor_dma_buf rsc;
   } rproc;
 };

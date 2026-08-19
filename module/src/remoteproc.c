@@ -89,6 +89,9 @@ static int velocitor_rproc_start(struct rproc *rproc) {
                : -ETIMEDOUT;
   }
 
+  // Update generation.
+  device->rproc.generation = readl(device->bar0 + VEL_REG_GENERATION);
+
   if (VEL_FW_STATUS_RUNNING != status) {
     dev_info(&dev->dev, "rproc: unable to start remote processor");
     return -EIO;
