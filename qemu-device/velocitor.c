@@ -165,6 +165,7 @@ struct VelocitorState {
     uint32_t generation;    /* 0x03C -- bumped on every entry into 2      */
     uint32_t trace_da;      /* where the firmware header says the ring is */
     uint32_t trace_len;
+    uint64_t trace_epoch;   /* virtual time at which this boot started    */
     QEMUTimer *boot_timer;
 
     /*
@@ -395,6 +396,16 @@ static void velocitor_mem_fill_pattern(VelocitorState *s)
 /* Bring-up DMA -- spec section 4.3, annex D.1 and D.2                 */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The trace ring lives in device-local memory, so it is defined further down,
+ * once the accessors for it exist.  It is declared here because the error
+ * path just below is the first thing that wants to log, and everything after
+ * it does too.
+ */
+static void velocitor_trace(VelocitorState *s, unsigned level, unsigned engine,
+                            uint32_t seq, const char *fmt, ...)
+    G_GNUC_PRINTF(5, 6);
+
 /* Simulated transfer latency, virtual time.  Arbitrary but fixed: what
  * matters is that the busy state exists and lasts a knowable while. */
 #define VEL_DMA_LATENCY_NS 1000
@@ -430,6 +441,11 @@ static void velocitor_error_qualify(VelocitorState *s, uint32_t code,
     s->err_notifyid = notifyid;
     s->err_handle = handle;
     s->err_generation = s->generation;
+
+    velocitor_trace(s, VEL_TRACE_LEVEL_ERROR, VEL_TRACE_ENGINE_NONE,
+                    VEL_TRACE_SEQ_NONE,
+                    "error %u, info 0x%" PRIx64 ", notifyid %u, handle %u",
+                    code, info, notifyid, handle);
 }
 
 /*
@@ -545,6 +561,90 @@ static void velocitor_mem_write32(VelocitorState *s, uint32_t off, uint32_t val)
     mem[off / 4] = cpu_to_le32(val);
 }
 
+/* ------------------------------------------------------------------ */
+/* Firmware trace ring -- spec section 6.6                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * One entry, spec section 6.6.  Written little-endian into device-local
+ * memory, where the driver reads it through the fixed aperture.
+ */
+struct VelocitorTraceEntry {
+    uint64_t timestamp;
+    uint16_t level;
+    uint16_t engine;
+    uint32_t seq;
+    char msg[112];
+} QEMU_PACKED;
+
+/*
+ * Append one line to the firmware's log.
+ *
+ * The model plays the processor (section 16), so this is the firmware's own
+ * journal: what it did, in its own ring, read by the driver through debugfs.
+ * It is not the QEMU log -- qemu_log_mask() says things to whoever launched
+ * the emulator, this says things to whoever is debugging the driver, and
+ * step 7 will make the second the interesting one.
+ *
+ * The index discipline is section 6.6's: free-running counters, slot at
+ * `head % VEL_TRACE_ENTRIES`, the entry written *before* head is published,
+ * and `dropped` incremented whenever an unread entry is overwritten.  `tail`
+ * belongs to the driver and is only ever read here.
+ *
+ * Silent until a firmware has been verified: before that trace_da is 0, and
+ * writing there would land on the firmware header itself.
+ */
+static void velocitor_trace(VelocitorState *s, unsigned level, unsigned engine,
+                            uint32_t seq, const char *fmt, ...)
+{
+    struct VelocitorTraceEntry entry;
+    uint8_t *mem;
+    uint32_t head, tail, slot;
+    va_list args;
+
+    if (s->trace_da == 0) {
+        return;
+    }
+
+    head = velocitor_mem_read32(s, s->trace_da + VEL_TRACE_OFF_HEAD);
+    tail = velocitor_mem_read32(s, s->trace_da + VEL_TRACE_OFF_TAIL);
+
+    /*
+     * Zeroed in full, not just NUL-terminated: the driver copies all 112
+     * bytes of msg, and whatever followed the text on this stack would
+     * otherwise cross into guest-visible memory.
+     */
+    memset(&entry, 0, sizeof(entry));
+    entry.timestamp =
+        cpu_to_le64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->trace_epoch);
+    entry.level = cpu_to_le16(level);
+    entry.engine = cpu_to_le16(engine);
+    entry.seq = cpu_to_le32(seq);
+
+    va_start(args, fmt);
+    vsnprintf(entry.msg, sizeof(entry.msg), fmt, args);
+    va_end(args);
+
+    slot = head % VEL_TRACE_ENTRIES;
+    mem = memory_region_get_ram_ptr(&s->mem);
+    memcpy(mem + s->trace_da + VEL_TRACE_HDR_SIZE + slot * VEL_TRACE_ENTRY,
+           &entry, sizeof(entry));
+
+    /*
+     * The slot we just took held the oldest unread entry.  Counting it is
+     * what section 6.6 forbids skipping: an overwrite the driver cannot see
+     * is the one thing the ring must never do quietly.
+     */
+    if (head - tail >= VEL_TRACE_ENTRIES) {
+        velocitor_mem_write32(s, s->trace_da + VEL_TRACE_OFF_DROPPED,
+                              velocitor_mem_read32(
+                                  s, s->trace_da + VEL_TRACE_OFF_DROPPED) + 1);
+    }
+
+    /* Published last: the entry is complete before it is announced. */
+    velocitor_mem_write32(s, s->trace_da + VEL_TRACE_OFF_HEAD, head + 1);
+}
+
 /*
  * The boot completes here, one virtual tick after the header checked out.
  *
@@ -572,6 +672,10 @@ static void velocitor_boot_done(void *opaque)
      */
     velocitor_mem_write32(s, s->trace_da + VEL_TRACE_OFF_ENTRY_SIZE,
                           VEL_TRACE_ENTRY);
+
+    velocitor_trace(s, VEL_TRACE_LEVEL_INFO, VEL_TRACE_ENGINE_NONE,
+                    VEL_TRACE_SEQ_NONE, "firmware running, generation %u",
+                    s->generation);
 }
 
 /*
@@ -634,6 +738,7 @@ static void velocitor_fw_verify(VelocitorState *s)
     s->fw_abi = abi;
     s->trace_da = trace_da;
     s->trace_len = trace_len;
+    s->trace_epoch = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     s->fw_status = VEL_FW_STATUS_VERIFIED;
 
     timer_mod(s->boot_timer,
@@ -650,6 +755,9 @@ static void velocitor_reset_write(VelocitorState *s, uint32_t val)
          * RSC_VALID here is what makes the driver's re-publication on the
          * next start a requirement rather than a courtesy -- and the table
          * it named belongs to a boot that is over (spec 6.5). */
+        velocitor_trace(s, VEL_TRACE_LEVEL_WARN, VEL_TRACE_ENGINE_NONE,
+                        VEL_TRACE_SEQ_NONE, "reset asserted, generation %u",
+                        s->generation);
         timer_del(s->boot_timer);
         velocitor_vq_purge(s);
         s->rsc_valid = 0;
@@ -1048,6 +1156,11 @@ static void velocitor_vq_sweep(VelocitorState *s, unsigned q)
                   "0x%08x, virtio status 0x%02x -- counted, not consumed; "
                   "rpmsg is annex D.5 and the data plane is spec 8\n",
                   q, pending, vq->gfeatures, vq->vstatus);
+
+    velocitor_trace(s, VEL_TRACE_LEVEL_INFO, VEL_TRACE_ENGINE_NONE,
+                    VEL_TRACE_SEQ_NONE,
+                    "queue %u swept %u head(s), gfeatures 0x%08x, status 0x%02x",
+                    q, pending, vq->gfeatures, vq->vstatus);
 }
 
 /*
@@ -1133,6 +1246,10 @@ static void velocitor_vq_enable(VelocitorState *s, unsigned q, uint32_t val)
     }
 
     vq->enable = 1;
+    velocitor_trace(s, VEL_TRACE_LEVEL_INFO, VEL_TRACE_ENGINE_NONE,
+                    VEL_TRACE_SEQ_NONE,
+                    "queue %u enabled, %u descriptors, notifyid %u, vector %u",
+                    q, vq->num, vq->notifyid, vq->msix_vector);
     velocitor_vq_sweep(s, q);
 }
 
@@ -1555,6 +1672,9 @@ static void velocitor_bar0_write(void *opaque, hwaddr addr, uint64_t val,
              * queues: every VQ_ENABLE goes back to zero, so the host's
              * recovery has to reprogram the window before the device will
              * look at a ring again. */
+            velocitor_trace(s, VEL_TRACE_LEVEL_ERROR, VEL_TRACE_ENGINE_NONE,
+                            VEL_TRACE_SEQ_NONE,
+                            "firmware crashed on request (ERR_INJECT bit 2)");
             timer_del(s->boot_timer);
             velocitor_vq_purge(s);
             s->fw_status = VEL_FW_STATUS_CRASHED;
@@ -1756,6 +1876,7 @@ static void velocitor_reset(DeviceState *dev)
     s->generation = 0;
     s->trace_da = 0;
     s->trace_len = 0;
+    s->trace_epoch = 0;
 
     s->err_inject = 0;
     s->err_inject_arg = 0;
@@ -1825,6 +1946,7 @@ static const VMStateDescription vmstate_velocitor = {
         VMSTATE_UINT32(generation, VelocitorState),
         VMSTATE_UINT32(trace_da, VelocitorState),
         VMSTATE_UINT32(trace_len, VelocitorState),
+        VMSTATE_UINT64(trace_epoch, VelocitorState),
         VMSTATE_UINT32(err_inject, VelocitorState),
         VMSTATE_UINT32(err_inject_arg, VelocitorState),
         VMSTATE_MSIX(parent_obj, VelocitorState),

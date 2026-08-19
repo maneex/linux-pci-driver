@@ -118,6 +118,19 @@
 #define VEL_TRACE_OFF_ENTRY_SIZE 0x0Cu
 #define VEL_TRACE_HDR_SIZE       0x10u
 
+/*
+ * Trace entry fields, section 6.6.  The section gives the structure without
+ * giving these two sets of values, and an implementation cannot write an
+ * entry without deciding both -- so they are named here rather than invented
+ * twice.  Three levels is what the model can honestly distinguish today.
+ */
+#define VEL_TRACE_LEVEL_INFO   0u
+#define VEL_TRACE_LEVEL_WARN   1u
+#define VEL_TRACE_LEVEL_ERROR  2u
+
+#define VEL_TRACE_ENGINE_NONE  0xFFFFu   /* no engine owns this entry */
+#define VEL_TRACE_SEQ_NONE     0u        /* not attached to an operation */
+
 /* ------------------------------------------------------------------ */
 /* BAR layout -- spec section 3                                        */
 /* ------------------------------------------------------------------ */
