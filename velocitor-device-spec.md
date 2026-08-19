@@ -1014,6 +1014,31 @@ que debugfs rend est cet instantané.
 Sans cette règle, deux `cat` concurrents se voleraient les entrées et `dropped` mentirait
 sur la cause. L'écrasement silencieux est proscrit : `dropped` est incrémenté par le modèle.
 
+**Sémantique des index.** `head`, `tail` et `dropped` sont des **compteurs libres** sur
+32 bits : ils comptent des entrées depuis le démarrage et ne sont jamais repliés sur la
+taille de l'anneau. La case d'une entrée est `index % VEL_TRACE_ENTRIES`.
+
+| Grandeur | Expression | Remarque |
+|---|---|---|
+| anneau vide | `head == tail` | |
+| entrées à lire | `head - tail` | soustraction **non signée**, le repli à 2³² se gère seul |
+| entrées perdues | `head - tail - VEL_TRACE_ENTRIES`, si positif | corroboré par `dropped` |
+
+Des indices déjà repliés obligeraient à inventer une convention pour distinguer « plein » de
+« vide » — sacrifier une case, ou porter un drapeau — et donneraient aux deux implémentations
+une occasion de la lire à l'envers. Des compteurs libres n'en ont pas besoin, et c'est la
+forme que virtio donne à `avail->idx` pour la même raison.
+
+**Le driver doit se resynchroniser avant de copier.** Si `head - tail > VEL_TRACE_ENTRIES`,
+les entrées les plus anciennes ont déjà été écrasées : `tail` désigne une case dont le
+contenu ne lui appartient plus. Il pose alors `tail = head - VEL_TRACE_ENTRIES` et rapporte
+l'écart. Copier depuis l'ancien `tail` rendrait des entrées récentes en les présentant comme
+anciennes — un mensonge que `dropped` ne rattraperait pas, puisqu'il compte ce qui a été
+écrasé, pas ce qui a été mal lu.
+
+L'ordre de lecture est le miroir de l'ordre de publication : le driver lit `head` d'abord,
+les entrées ensuite. Le modèle écrit l'entrée d'abord, `head` ensuite.
+
 ---
 
 ## 7. Plan de contrôle — rpmsg
@@ -1939,6 +1964,7 @@ le projet doit permettre de formuler.
 | **étape 6** | **Le bloc d'erreur conserve la **première** erreur non acquittée ; les suivantes n'incrémentent que `ERR_DROPPED` (§4.4)** | **le §4.4 définit `ERR_DROPPED` sans dire laquelle des deux survit. Garder la dernière donnerait au driver le symptôme d'une cascade avec la cause écrasée, ce qui vide le registre de son intérêt : « ce que le driver n'a pas vu » doit inclure ce qui l'a déclenché** |
 | étape 6 | Le parcours des `notifyid` a lieu à la montée de `RSC_VALID`, la validation reste `ver` et `num` | le device a maintenant besoin de la carte `notifyid` → queue, puisque le `DOORBELL` ne porte rien d'autre (§4.2). Mais une table qu'il ne sait pas parcourir n'est pas pour autant invalide : elle coûte le routage, pas la publication. Le journal le dit à la montée de `RSC_VALID`, pas au premier doorbell |
 | étape 6 | Le balayage de l'`avail` compte les têtes et avance son index, sans rien consommer | l'étape 6 ne peut honnêtement prétendre qu'à ceci : le doorbell arrive, les adresses publiées sont lisibles en bus-master, `CNT_DB_RX` et `CNT_DESC` le disent. Consommer appartient au §7 et à D.5. Ne pas avancer l'index recompterait les mêmes têtes à chaque doorbell — un compteur faux est pire ici qu'un compteur incomplet (D.6) |
+| **étape 6** | **`head`, `tail` et `dropped` de l'anneau de trace sont des compteurs libres, la case étant `index % VEL_TRACE_ENTRIES` (§6.6)** | **le §6.6 donnait la structure sans dire ce que valaient les index. Des indices repliés imposent une convention pour séparer « plein » de « vide », donc une occasion de plus pour les deux implémentations de diverger ; des compteurs libres rendent « vide » et « en retard » calculables par une soustraction non signée, et la resynchronisation du driver explicite. Même forme que l'`avail->idx` de virtio, pour la même raison** |
 | étape 6 | Une écriture de description sur une queue activée est refusée et journalisée | le §4.2 met `VQ_ENABLE` en dernier pour que la description soit complète au moment de l'activation. En accepter une ensuite reviendrait à laisser le device lire un anneau dont l'adresse change sous lui ; la refuser transforme un bug de driver en ligne de log |
 
 ### Décisions écartées, et pourquoi
