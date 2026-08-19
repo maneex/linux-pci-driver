@@ -70,6 +70,19 @@
 #define VEL_RPMSG_CTRL_ADDR 1024u
 #define VEL_CTRL_NAME       "velocitor-ctrl"
 
+/* Control plane operations, section 7.2 */
+#define VEL_OP_INFO         1u
+#define VEL_OP_ALLOC        2u
+#define VEL_OP_FREE         3u
+#define VEL_OP_STAT         4u
+
+/*
+ * ctrl_caps of vel_info_resp, section 7.2.  A capability that governs ALLOC
+ * belongs to the control plane, not to the data vdev's feature negotiation --
+ * which is where it lived until v0.6.2.
+ */
+#define VEL_CTRL_CAP_NODE_HINT (1u << 0)   /* honours the requested node */
+
 /* firmware */
 #define VEL_FW_MAGIC        0x4F465456u
 #define VEL_FW_ABI          1u

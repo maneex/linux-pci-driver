@@ -58,6 +58,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/cutils.h"
 #include "qemu/timer.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/pci.h"
@@ -65,6 +66,7 @@
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qom/object.h"
+#include "standard-headers/linux/virtio_ring.h"
 
 #include "velocitor_hw.h"
 
@@ -207,6 +209,22 @@ struct VelocitorState {
      */
     uint32_t vq_select;
     VelocitorQueue vq[VEL_VQ_COUNT];
+
+    /* Whether this generation has announced itself yet (spec 7.1) */
+    bool rpmsg_announced;
+
+    /*
+     * Queues waiting to be swept, and the timer that does it.
+     *
+     * Annex D.1: never in the MMIO callback.  Sweeping inline would raise the
+     * completion vector before the guest's writel() had returned, so the
+     * interrupt would land on the sender's own stack -- which holds
+     * virtio_rpmsg_bus's tx_lock, and a reply that leads to another send
+     * deadlocks against it.  A virtual timer costs one tick and puts the
+     * interrupt on a stack that owns nothing.
+     */
+    uint32_t vq_sweep;
+    QEMUTimer *vq_timer;
 
     /* Qualified error, spec section 4.4 */
     uint32_t err_code;
@@ -1011,6 +1029,50 @@ static void velocitor_rsc_publish(VelocitorState *s, uint32_t val)
 /* ------------------------------------------------------------------ */
 
 /*
+ * The rpmsg wire format, spec section 7.1: taken from virtio_rpmsg_bus as it
+ * stands, with no variant.  Spelled out here for the same reason the resource
+ * table is -- it is a Linux contract, not a device one, so velocitor_hw.h,
+ * which depends on nothing, is not its place.
+ */
+#define VEL_RPMSG_NAME_SIZE  32u
+#define VEL_RPMSG_NS_CREATE  0u
+#define VEL_RPMSG_BUF_SIZE   512u   /* MAX_RPMSG_BUF_SIZE                  */
+#define VEL_VIRTIO_RPMSG_F_NS 0u    /* name service announcements          */
+
+struct VelocitorRpmsgHdr {
+    uint32_t src;
+    uint32_t dst;
+    uint32_t reserved;
+    uint16_t len;
+    uint16_t flags;
+} QEMU_PACKED;
+
+struct VelocitorNsMsg {
+    char name[VEL_RPMSG_NAME_SIZE];
+    uint32_t addr;
+    uint32_t flags;
+} QEMU_PACKED;
+
+/* And the payload the two sides carry inside it, spec section 7.2. */
+struct VelocitorCtrlMsg {
+    uint32_t seq;
+    uint16_t op;
+    uint16_t flags;
+    uint32_t status;
+    uint32_t reserved;
+} QEMU_PACKED;
+
+struct VelocitorInfoResp {
+    uint32_t abi;
+    uint32_t caps;
+    uint32_t ctrl_caps;
+    uint32_t nodes;
+    uint32_t engines;
+    uint32_t alloc_align;
+    uint32_t generation;
+} QEMU_PACKED;
+
+/*
  * Split ring layout, virtio 1.1 section 2.6.  Only the available ring is
  * spelled out here: the model reads the driver's index and the heads it
  * published, and nothing else yet.  The three ring addresses arrive through
@@ -1019,6 +1081,8 @@ static void velocitor_rsc_publish(VelocitorState *s, uint32_t val)
  */
 #define VEL_AVAIL_OFF_IDX    2u   /* flags, then idx                        */
 #define VEL_AVAIL_OFF_RING   4u   /* then the array of 16-bit heads         */
+#define VEL_USED_OFF_IDX     2u   /* same shape                             */
+#define VEL_USED_OFF_RING    4u   /* then the array of vring_used_elem      */
 
 /*
  * Read from host memory on behalf of a queue.
@@ -1050,6 +1114,30 @@ static bool velocitor_vq_host_read(VelocitorState *s, unsigned q,
 
     s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_DMA_RD)]++;
     s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_BYTES_RD_LO)] += len;
+    return true;
+}
+
+static bool velocitor_vq_host_write(VelocitorState *s, unsigned q,
+                                    uint64_t iova, const void *buf, size_t len)
+{
+    PCIDevice *pdev = PCI_DEVICE(s);
+
+    if (iova + len > (1ULL << VEL_DMA_BITS)) {
+        velocitor_error_qualify(s, VEL_ERR_DMA_WIDTH, iova,
+                                s->vq[q].notifyid, 0);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return false;
+    }
+
+    if (pci_dma_write(pdev, iova, buf, len) != MEMTX_OK) {
+        velocitor_error_qualify(s, VEL_ERR_DMA_WIDTH, iova,
+                                s->vq[q].notifyid, 0);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return false;
+    }
+
+    s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_DMA_WR)]++;
+    s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_BYTES_WR_LO)] += len;
     return true;
 }
 
@@ -1107,6 +1195,302 @@ static void velocitor_vq_refresh_negotiation(VelocitorState *s, unsigned q)
  * same heads at every doorbell and make the counter lie, and a counter that
  * lies is worse here than one that is merely incomplete (annex D.6).
  */
+/*
+ * Take one head off a queue's available ring and resolve its first
+ * descriptor.
+ *
+ * One descriptor, not a chain: rpmsg buffers are a single scatter-gather
+ * entry each, in both directions.  A chain here would mean the host is
+ * speaking a protocol this endpoint does not implement, and saying so is
+ * more useful than following it into the data plane of section 8.
+ */
+static bool velocitor_vq_pop(VelocitorState *s, unsigned q, uint16_t *head,
+                             uint64_t *addr, uint32_t *len)
+{
+    VelocitorQueue *vq = &s->vq[q];
+    uint64_t avail = ((uint64_t)vq->avail_hi << 32) | vq->avail_lo;
+    uint64_t desc = ((uint64_t)vq->desc_hi << 32) | vq->desc_lo;
+    struct vring_desc entry;
+    uint16_t idx, slot, raw;
+
+    if (!velocitor_vq_host_read(s, q, avail + VEL_AVAIL_OFF_IDX,
+                                &raw, sizeof(raw))) {
+        return false;
+    }
+    idx = le16_to_cpu(raw);
+    if (idx == (uint16_t)vq->last_avail) {
+        return false;
+    }
+
+    slot = (uint16_t)vq->last_avail % vq->num;
+    if (!velocitor_vq_host_read(s, q, avail + VEL_AVAIL_OFF_RING + 2u * slot,
+                                &raw, sizeof(raw))) {
+        return false;
+    }
+    *head = le16_to_cpu(raw);
+
+    if (*head >= vq->num) {
+        velocitor_error_qualify(s, VEL_ERR_BAD_DESC, *head, vq->notifyid, 0);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return false;
+    }
+
+    if (!velocitor_vq_host_read(s, q, desc + *head * sizeof(entry),
+                                &entry, sizeof(entry))) {
+        return false;
+    }
+
+    if (le16_to_cpu(entry.flags) & VRING_DESC_F_NEXT) {
+        qemu_log_mask(LOG_UNIMP,
+                      "velocitor: queue %u head %u starts a descriptor chain "
+                      "-- only single-entry buffers are implemented (spec 7, "
+                      "annex D.5)\n", q, *head);
+    }
+
+    *addr = le64_to_cpu(entry.addr);
+    *len = le32_to_cpu(entry.len);
+    vq->last_avail = (uint16_t)(vq->last_avail + 1);
+    s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_DESC)]++;
+    return true;
+}
+
+/*
+ * Hand a head back, with the number of bytes written into it, and notify.
+ *
+ * The vector is the one the driver programmed for this queue (spec 4.2), so
+ * the model never decides where a completion lands -- which is what lets
+ * section 3.3 promise one vector per queue and no MMIO in the handler.
+ */
+static void velocitor_vq_push(VelocitorState *s, unsigned q, uint16_t head,
+                              uint32_t len)
+{
+    VelocitorQueue *vq = &s->vq[q];
+    uint64_t used = ((uint64_t)vq->used_hi << 32) | vq->used_lo;
+    struct vring_used_elem elem;
+    uint16_t idx, raw;
+
+    if (!velocitor_vq_host_read(s, q, used + VEL_USED_OFF_IDX,
+                                &raw, sizeof(raw))) {
+        return;
+    }
+    idx = le16_to_cpu(raw);
+
+    elem.id = cpu_to_le32(head);
+    elem.len = cpu_to_le32(len);
+    if (!velocitor_vq_host_write(s, q,
+                                 used + VEL_USED_OFF_RING +
+                                 (idx % vq->num) * sizeof(elem),
+                                 &elem, sizeof(elem))) {
+        return;
+    }
+
+    /* Published after the element is complete, like head in the trace ring. */
+    raw = cpu_to_le16(idx + 1);
+    if (!velocitor_vq_host_write(s, q, used + VEL_USED_OFF_IDX,
+                                 &raw, sizeof(raw))) {
+        return;
+    }
+
+    velocitor_raise(s, vq->msix_vector);
+}
+
+/*
+ * Send one rpmsg message, spec section 7.1 and annex D.5.
+ *
+ * It goes out on the control vdev's vring 0, which section 3.3 fixes as
+ * "what the device sends to Linux" -- and whose buffers Linux published for
+ * exactly this.  Running out of them is not an error the device can fix: it
+ * means the host has not returned any, and saying so is the only useful
+ * thing to do about it.
+ */
+static bool velocitor_rpmsg_send(VelocitorState *s, uint32_t src, uint32_t dst,
+                                 const void *payload, uint16_t len)
+{
+    unsigned q = VEL_VQ_CTRL_RX;
+    struct VelocitorRpmsgHdr hdr;
+    uint64_t addr;
+    uint32_t buflen;
+    uint16_t head;
+
+    if (!s->vq[q].enable) {
+        return false;
+    }
+
+    if (!velocitor_vq_pop(s, q, &head, &addr, &buflen)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: no receive buffer to answer on (spec 7.1) "
+                      "-- the host has not returned any\n");
+        return false;
+    }
+
+    if (buflen < sizeof(hdr) + len) {
+        velocitor_error_qualify(s, VEL_ERR_OUT_OF_BOUNDS, buflen,
+                                s->vq[q].notifyid, 0);
+        velocitor_vq_push(s, q, head, 0);
+        return false;
+    }
+
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.src = cpu_to_le32(src);
+    hdr.dst = cpu_to_le32(dst);
+    hdr.len = cpu_to_le16(len);
+
+    if (!velocitor_vq_host_write(s, q, addr, &hdr, sizeof(hdr)) ||
+        !velocitor_vq_host_write(s, q, addr + sizeof(hdr), payload, len)) {
+        return false;
+    }
+
+    velocitor_vq_push(s, q, head, sizeof(hdr) + len);
+    return true;
+}
+
+/*
+ * The name service announcement, spec section 7.1.
+ *
+ * Linux creates no dynamic rpmsg device unless VIRTIO_RPMSG_F_NS was
+ * negotiated *and* the remote announces itself on VEL_RPMSG_NS_ADDR.  The
+ * spec calls this the classic trap, and it is the one message both sides
+ * must agree on before they have a channel to disagree over.
+ *
+ * The moment is not the one section 7.1 first prescribed.  It said "when
+ * both of vdev0's vrings are enabled", which was true while the driver
+ * programmed the window after rproc_boot() returned.  The window is now
+ * programmed inside ops->start(), so at activation the subdevices do not
+ * exist yet and gfeatures is still zero -- announcing then would break the
+ * very condition the section imposes.  So the trigger is the first sweep
+ * where F_NS is negotiated and a receive buffer exists, which is also the
+ * first instant the announcement can physically be sent.
+ */
+static void velocitor_rpmsg_announce(VelocitorState *s)
+{
+    struct VelocitorNsMsg ns;
+
+    memset(&ns, 0, sizeof(ns));
+    pstrcpy(ns.name, sizeof(ns.name), VEL_CTRL_NAME);
+    ns.addr = cpu_to_le32(VEL_RPMSG_CTRL_ADDR);
+    ns.flags = cpu_to_le32(VEL_RPMSG_NS_CREATE);
+
+    if (!velocitor_rpmsg_send(s, VEL_RPMSG_CTRL_ADDR, VEL_RPMSG_NS_ADDR,
+                              &ns, sizeof(ns))) {
+        return;
+    }
+
+    s->rpmsg_announced = true;
+    velocitor_trace(s, VEL_TRACE_LEVEL_INFO, VEL_TRACE_ENGINE_NONE,
+                    VEL_TRACE_SEQ_NONE, "announced \"%s\" at address %u",
+                    VEL_CTRL_NAME, VEL_RPMSG_CTRL_ADDR);
+}
+
+/*
+ * One control-plane request, spec section 7.2.  The reply carries the
+ * request's own seq back: the driver matches on it, and a response that
+ * invented its own would be indistinguishable from a lost one.
+ */
+static void velocitor_rpmsg_recv(VelocitorState *s, uint32_t src,
+                                 const void *data, uint32_t len)
+{
+    const struct VelocitorCtrlMsg *req = data;
+    uint8_t buffer[sizeof(struct VelocitorCtrlMsg) +
+                   sizeof(struct VelocitorInfoResp)];
+    struct VelocitorCtrlMsg *resp = (struct VelocitorCtrlMsg *)buffer;
+    uint16_t op;
+    uint16_t resp_len = sizeof(*resp);
+
+    if (len < sizeof(*req)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: control message of %u byte(s), shorter than "
+                      "a header (spec 7.2)\n", len);
+        return;
+    }
+
+    op = le16_to_cpu(req->op);
+    memset(buffer, 0, sizeof(buffer));
+    resp->seq = req->seq;
+    resp->op = req->op;
+
+    switch (op) {
+    case VEL_OP_INFO: {
+        struct VelocitorInfoResp *info = (struct VelocitorInfoResp *)(resp + 1);
+
+        info->abi = cpu_to_le32(VEL_FW_ABI);
+        info->caps = cpu_to_le32(VEL_CAP_FP32 | VEL_CAP_BF16 |
+                                 VEL_CAP_TRANSPOSE);
+        info->ctrl_caps = cpu_to_le32(VEL_CTRL_CAP_NODE_HINT);
+        info->nodes = cpu_to_le32(VEL_NODES);
+        info->engines = cpu_to_le32(VEL_ENGINES);
+        info->alloc_align = cpu_to_le32(VEL_ALLOC_ALIGN);
+        info->generation = cpu_to_le32(s->generation);
+        resp_len += sizeof(*info);
+        break;
+    }
+
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "velocitor: control op %u -- not implemented (spec "
+                      "7.2)\n", op);
+        resp->status = cpu_to_le32((uint32_t)-ENOSYS);
+        break;
+    }
+
+    velocitor_trace(s, VEL_TRACE_LEVEL_INFO, VEL_TRACE_ENGINE_NONE,
+                    le32_to_cpu(req->seq), "control op %u from address %u",
+                    op, src);
+
+    velocitor_rpmsg_send(s, VEL_RPMSG_CTRL_ADDR, src, buffer, resp_len);
+}
+
+/* Consume everything the host put on the control vdev's transmit ring. */
+static void velocitor_rpmsg_drain(VelocitorState *s)
+{
+    unsigned q = VEL_VQ_CTRL_TX;
+    uint8_t buffer[VEL_RPMSG_BUF_SIZE];
+    struct VelocitorRpmsgHdr hdr;
+    uint64_t addr;
+    uint32_t len;
+    uint16_t head;
+
+    while (velocitor_vq_pop(s, q, &head, &addr, &len)) {
+        uint16_t payload;
+
+        if (len < sizeof(hdr) || len > sizeof(buffer)) {
+            velocitor_error_qualify(s, VEL_ERR_BAD_DESC, len,
+                                    s->vq[q].notifyid, 0);
+            velocitor_vq_push(s, q, head, 0);
+            continue;
+        }
+
+        if (!velocitor_vq_host_read(s, q, addr, buffer, len)) {
+            return;
+        }
+
+        memcpy(&hdr, buffer, sizeof(hdr));
+        payload = le16_to_cpu(hdr.len);
+        if (sizeof(hdr) + payload > len) {
+            velocitor_error_qualify(s, VEL_ERR_BAD_DESC, payload,
+                                    s->vq[q].notifyid, 0);
+            velocitor_vq_push(s, q, head, 0);
+            continue;
+        }
+
+        /* The buffer goes back before the answer goes out: the reply needs a
+         * receive buffer, not this one, and holding it would only shrink the
+         * pool the host lent us. */
+        velocitor_vq_push(s, q, head, 0);
+        velocitor_rpmsg_recv(s, le32_to_cpu(hdr.src), buffer + sizeof(hdr),
+                             payload);
+    }
+}
+
+/*
+ * Sweep one queue after a doorbell, or at activation.
+ *
+ * What that means depends on which queue.  The control vdev's transmit ring
+ * carries requests, so they are consumed here.  Its receive ring carries
+ * buffers the host lent the device to answer in: they are not consumed on
+ * sight, only when there is something to put in one -- otherwise the pool
+ * would empty itself for nothing.  The two engine queues are still counted
+ * and not consumed; that is section 8, and step 8.
+ */
 static void velocitor_vq_sweep(VelocitorState *s, unsigned q)
 {
     VelocitorQueue *vq = &s->vq[q];
@@ -1120,6 +1504,11 @@ static void velocitor_vq_sweep(VelocitorState *s, unsigned q)
 
     velocitor_vq_refresh_negotiation(s, q);
 
+    if (q == VEL_VQ_CTRL_TX) {
+        velocitor_rpmsg_drain(s);
+        return;
+    }
+
     if (!velocitor_vq_host_read(s, q, avail + VEL_AVAIL_OFF_IDX,
                                 &raw, sizeof(raw))) {
         return;
@@ -1128,6 +1517,16 @@ static void velocitor_vq_sweep(VelocitorState *s, unsigned q)
 
     pending = idx - (uint16_t)vq->last_avail;
     if (pending == 0) {
+        return;
+    }
+
+    if (q == VEL_VQ_CTRL_RX) {
+        /* Annex D.5: only once F_NS is negotiated, and only once the host
+         * has lent a buffer to say it in. */
+        if (!s->rpmsg_announced &&
+            (vq->gfeatures & (1u << VEL_VIRTIO_RPMSG_F_NS))) {
+            velocitor_rpmsg_announce(s);
+        }
         return;
     }
 
@@ -1152,15 +1551,44 @@ static void velocitor_vq_sweep(VelocitorState *s, unsigned q)
     vq->last_avail = (uint16_t)(vq->last_avail + pending);
 
     qemu_log_mask(LOG_UNIMP,
-                  "velocitor: queue %u has %u available head(s), gfeatures "
-                  "0x%08x, virtio status 0x%02x -- counted, not consumed; "
-                  "rpmsg is annex D.5 and the data plane is spec 8\n",
-                  q, pending, vq->gfeatures, vq->vstatus);
+                  "velocitor: queue %u has %u available head(s) -- counted, "
+                  "not consumed; the data plane is spec 8\n", q, pending);
 
     velocitor_trace(s, VEL_TRACE_LEVEL_INFO, VEL_TRACE_ENGINE_NONE,
                     VEL_TRACE_SEQ_NONE,
                     "queue %u swept %u head(s), gfeatures 0x%08x, status 0x%02x",
                     q, pending, vq->gfeatures, vq->vstatus);
+}
+
+/* Simulated service latency, virtual time -- the same shape as the DMA. */
+#define VEL_VQ_LATENCY_NS 1000
+
+/*
+ * Note that a queue has work and come back to it, annex D.1.
+ *
+ * The doorbell and VQ_ENABLE both arrive from an MMIO write, and neither may
+ * do the work there: see the comment on vq_sweep in the state above for what
+ * happens when the completion interrupt lands on the writer's own stack.
+ */
+static void velocitor_vq_arm(VelocitorState *s, unsigned q)
+{
+    s->vq_sweep |= 1u << q;
+    timer_mod(s->vq_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VEL_VQ_LATENCY_NS);
+}
+
+static void velocitor_vq_service(void *opaque)
+{
+    VelocitorState *s = opaque;
+    uint32_t pending = s->vq_sweep;
+    unsigned q;
+
+    s->vq_sweep = 0;
+    for (q = 0; q < VEL_VQ_COUNT; q++) {
+        if (pending & (1u << q)) {
+            velocitor_vq_sweep(s, q);
+        }
+    }
 }
 
 /*
@@ -1179,6 +1607,12 @@ static void velocitor_vq_sweep(VelocitorState *s, unsigned q)
 static void velocitor_vq_purge(VelocitorState *s)
 {
     unsigned q;
+
+    s->rpmsg_announced = false;
+    s->vq_sweep = 0;
+    if (s->vq_timer) {
+        timer_del(s->vq_timer);
+    }
 
     for (q = 0; q < VEL_VQ_COUNT; q++) {
         s->vq[q].enable = 0;
@@ -1250,7 +1684,7 @@ static void velocitor_vq_enable(VelocitorState *s, unsigned q, uint32_t val)
                     VEL_TRACE_SEQ_NONE,
                     "queue %u enabled, %u descriptors, notifyid %u, vector %u",
                     q, vq->num, vq->notifyid, vq->msix_vector);
-    velocitor_vq_sweep(s, q);
+    velocitor_vq_arm(s, q);
 }
 
 /*
@@ -1284,7 +1718,7 @@ static void velocitor_doorbell(VelocitorState *s, uint32_t notifyid)
             return;
         }
 
-        velocitor_vq_sweep(s, q);
+        velocitor_vq_arm(s, q);
         return;
     }
 
@@ -1802,6 +2236,7 @@ static void velocitor_realize(PCIDevice *pdev, Error **errp)
 
     s->dma_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, velocitor_dma_run, s);
     s->boot_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, velocitor_boot_done, s);
+    s->vq_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, velocitor_vq_service, s);
 }
 
 static void velocitor_exit(PCIDevice *pdev)
@@ -1810,6 +2245,7 @@ static void velocitor_exit(PCIDevice *pdev)
 
     timer_free(s->dma_timer);
     timer_free(s->boot_timer);
+    timer_free(s->vq_timer);
     msix_uninit(pdev, &s->bar4, &s->bar4);
 }
 
@@ -1851,6 +2287,11 @@ static void velocitor_reset(DeviceState *dev)
     /* Annex D.3 point 3.  The whole window, not just the enables: nothing
      * the driver said about a ring survives the device it described. */
     s->vq_select = 0;
+    s->rpmsg_announced = false;
+    s->vq_sweep = 0;
+    if (s->vq_timer) {
+        timer_del(s->vq_timer);
+    }
     memset(s->vq, 0, sizeof(s->vq));
     for (unsigned q = 0; q < VEL_VQ_COUNT; q++) {
         s->vq[q].notifyid = VEL_NOTIFYID_NONE;
@@ -1929,6 +2370,8 @@ static const VMStateDescription vmstate_velocitor = {
         VMSTATE_UINT32(rsc_len, VelocitorState),
         VMSTATE_UINT32(rsc_valid, VelocitorState),
         VMSTATE_UINT32(vq_select, VelocitorState),
+        VMSTATE_BOOL(rpmsg_announced, VelocitorState),
+        VMSTATE_UINT32(vq_sweep, VelocitorState),
         VMSTATE_STRUCT_ARRAY(vq, VelocitorState, VEL_VQ_COUNT, 1,
                              vmstate_velocitor_queue, VelocitorQueue),
         VMSTATE_UINT32(err_code, VelocitorState),
