@@ -9,6 +9,7 @@
 
 // Driver headers.
 #include "dma.h"
+#include "identity.h"
 #include "vring.h"
 
 struct velocitor_dev {
@@ -17,12 +18,7 @@ struct velocitor_dev {
 
   struct dentry *debugfs;
 
-  struct {
-    struct {
-      u16 minor;
-      u16 major;
-    } version;
-  } identity;
+  struct velocitor_identity identity;
 
   struct {
     struct mutex lock;
