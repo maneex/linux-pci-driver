@@ -30,8 +30,6 @@ struct velocitor_dtrace_entry {
 };
 static_assert(sizeof(struct velocitor_dtrace_entry) == VEL_TRACE_ENTRY);
 
-#define VEL_TRACE_ENGINE_NONE 0xFFFFu
-
 static int velocitor_dtrace_debugfs_show(struct seq_file *m, void *unused) {
   const struct velocitor_dtrace_header *header = m->private;
   const struct velocitor_dtrace_entry *entries = (const void *)(header + 1);

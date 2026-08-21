@@ -10,6 +10,7 @@
 
 // Driver headers.
 #include "counters.h"
+#include "ctrl.h"
 #include "debugfs.h"
 #include "device.h"
 #include "dma.h"
@@ -122,6 +123,10 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   // Initialize non-PCI (i.e. LAN/SCSI/etc parts of the chip)
   // Enable DMA/processing engines
 
+  // Control plane table -- owned by the card, not by the rpmsg channel.
+  if ((err = velocitor_ctrl_initialize(dev)))
+    return err;
+
   // Device trace.
   if ((err = velocitor_dtrace_initialize(dev)))
     return err;
@@ -154,9 +159,24 @@ static struct pci_driver velocitor_pci_driver = {
     .dev_groups = NULL};
 
 static int __init init_(void) {
+  int err = 0;
+
   pr_info("velocitor: loading driver\n");
   velocitor_debugfs_root = debugfs_create_dir(KBUILD_MODNAME, NULL);
-  return pci_register_driver(&velocitor_pci_driver);
+
+  if ((err = velocitor_ctrl_rpmsg_initialize()))
+    goto error_debugfs;
+
+  if ((err = pci_register_driver(&velocitor_pci_driver)))
+    goto error_rpmsg;
+
+  return 0;
+
+error_rpmsg:
+  velocitor_ctrl_rpmsg_release();
+error_debugfs:
+  debugfs_remove_recursive(velocitor_debugfs_root);
+  return err;
 }
 
 static void __exit exit_(void) {
@@ -170,6 +190,7 @@ static void __exit exit_(void) {
 
   pr_info("velocitor: unloading driver\n");
   pci_unregister_driver(&velocitor_pci_driver);
+  velocitor_ctrl_rpmsg_release();
   debugfs_remove_recursive(velocitor_debugfs_root);
 }
 

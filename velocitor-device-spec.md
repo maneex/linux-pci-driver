@@ -1113,6 +1113,8 @@ struct vel_alloc_resp { __le32 handle; __le32 node;
                         __le32 generation; __le32 reserved;
                         __le64 dev_offset; };
 
+struct vel_free_req   { __le32 handle; __le32 reserved; };
+
 struct vel_stat_node  { __le64 capacity; __le64 free; };
 struct vel_stat_resp  { struct vel_stat_node node[VEL_NODES];
                         __le32 live_handles; __le32 reserved; };
@@ -1132,6 +1134,12 @@ différentes.
 **Les handles commencent à 1.** Zéro est le sentinelle « matrice non résidente » du §8.3 :
 un allocateur *bump* qui rendrait 0 à la première allocation ferait traiter celle-ci comme
 une adresse hôte, silencieusement, une fois par session.
+
+**`FREE` porte le handle qu'il invalide**, dans un `vel_free_req`. La v0.6.3 décrivait
+l'opération sans lui donner de requête — le tableau des `op` la nomme, les structures ne la
+définissent pas. `flags` et `reserved` de `vel_msg` ne pouvaient pas la porter : le §7.2 dit
+`reserved` écrit à zéro et ignoré en lecture, et détourner un champ existant est exactement
+ce que le §10.2 interdit pour l'UAPI. Ajoutée à l'implémentation, cf. §16.
 
 **`FREE` invalide toujours le handle**, même si l'allocateur ne récupère pas la mémoire.
 Sans cela, l'erreur `ERR_CODE = 3` serait indétectable. Les handles ne sont jamais
@@ -1977,6 +1985,8 @@ le projet doit permettre de formuler.
 | **étape 6** | **Valeurs de `level` (0 info, 1 warn, 2 error) et sentinelle `seq = 0` pour une entrée sans opération, dans l'en-tête partagé** | **le §6.6 donne les deux champs sans donner leurs valeurs, et on ne peut pas écrire une entrée sans en choisir. Trois niveaux sont ce que le modèle sait honnêtement distinguer aujourd'hui ; `seq` a besoin d'un « sans objet » comme `engine` a le sien, puisque le journal du firmware précède de loin la première opération portant un jeton (§10.2)** |
 | **étape 6** | **`timestamp` porte des nanosecondes d'horloge virtuelle depuis le démarrage du firmware, pas des cycles simulés** | **le §6.6 dit « cycles simulés depuis le reset », mais le §A.5 fait des cycles un coût forfaitaire *par opération* — il n'en existe aucune source tant que les moteurs ne sont pas écrits, et le champ vaudrait 0 sur chaque ligne. L'horloge virtuelle est déterministe (D.6) et pilotable par `clock_step`, donc elle garde la propriété qui compte : deux exécutions identiques produisent les mêmes horodatages. **À revoir à l'étape 10**, quand les moteurs donneront un vrai compteur de cycles** |
 | **étape 6** | **`head`, `tail` et `dropped` de l'anneau de trace sont des compteurs libres, la case étant `index % VEL_TRACE_ENTRIES` (§6.6)** | **le §6.6 donnait la structure sans dire ce que valaient les index. Des indices repliés imposent une convention pour séparer « plein » de « vide », donc une occasion de plus pour les deux implémentations de diverger ; des compteurs libres rendent « vide » et « en retard » calculables par une soustraction non signée, et la resynchronisation du driver explicite. Même forme que l'`avail->idx` de virtio, pour la même raison** |
+| **étape 7** | **`FREE` reçoit une requête, `vel_free_req { __le32 handle; __le32 reserved; }` (§7.2)** | **le §7.2 nommait l'opération sans lui donner de structure, et une opération qui invalide un handle doit dire lequel. Le driver a découvert le trou en dimensionnant ses requêtes : `FREE` s'y retrouvait à côté d'`INFO` et de `STAT`, sans charge utile. `reserved` porte le handle nulle part : le §7.2 le dit écrit à zéro et ignoré en lecture, donc s'en servir contredirait le contrat au lieu de le compléter** |
+| **étape 7** | **Le driver n'accepte du device qu'un `status` nul ou dans `[-MAX_ERRNO, -1]`, et vérifie que la réponse porte l'`op` demandée (§7.2, §9)** | **le §9 fait du mensonge du modèle une fonctionnalité, et l'appariement par `seq` seul ne dit pas que la réponse répond à la question posée. Un `status` non filtré devient un numéro d'erreur inventé au retour d'un ioctl du §10.2 ; une réponse trop courte recopiée telle quelle donnerait au diagnostic croisé du §7.3 un écart qui serait celui du driver, pas celui du firmware — soit précisément le faux positif que le §11 dit vouloir éviter** |
 | étape 6 | Une écriture de description sur une queue activée est refusée et journalisée | le §4.2 met `VQ_ENABLE` en dernier pour que la description soit complète au moment de l'activation. En accepter une ensuite reviendrait à laisser le device lire un anneau dont l'adresse change sous lui ; la refuser transforme un bug de driver en ligne de log |
 
 ### Décisions écartées, et pourquoi

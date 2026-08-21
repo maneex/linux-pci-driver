@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 
 // Driver headers.
+#include "ctrl.h"
 #include "device-trace.h"
 #include "dma.h"
 #include "identity.h"
@@ -42,6 +43,10 @@ struct velocitor_dev {
   } vring;
 
   struct velocitor_dtrace dtrace;
+
+  // Control plane, spec 7. The table outlives the rpmsg channel on purpose;
+  // see the comment on struct velocitor_ctrl.
+  struct velocitor_ctrl ctrl;
 
   struct {
     struct rproc *handle;

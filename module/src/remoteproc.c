@@ -63,7 +63,18 @@ static int velocitor_rproc_walk_rsc_table(struct velocitor_dev *device,
   return VEL_VRINGS_COUNT == vring_index ? 0 : -EINVAL;
 }
 
+static int velocitor_rproc_stop(struct rproc *rproc) {
+  struct pci_dev *dev = to_pci_dev(rproc->dev.parent);
+  const struct velocitor_dev *device = pci_get_drvdata(dev);
+
+  writel(1, device->bar0 + VEL_REG_RESET);
+  writel(0, device->bar0 + VEL_REG_RSC_VALID);
+
+  return 0;
+}
+
 static int velocitor_rproc_start(struct rproc *rproc) {
+  int err = 0;
   struct pci_dev *dev = to_pci_dev(rproc->dev.parent);
   struct velocitor_dev *device = pci_get_drvdata(dev);
 
@@ -84,14 +95,16 @@ static int velocitor_rproc_start(struct rproc *rproc) {
   if (readl_poll_timeout(device->bar0 + VEL_REG_FW_STATUS, status,
                          status >= VEL_FW_STATUS_RUNNING, 20, 20000)) {
     dev_err(&dev->dev, "rproc: error while starting firmware.");
-    return VEL_ERR_FW_HEADER == readl(device->bar0 + VEL_REG_ERR_CODE)
-               ? -ENODEV
-               : -ETIMEDOUT;
+    err = VEL_ERR_FW_HEADER == readl(device->bar0 + VEL_REG_ERR_CODE)
+              ? -ENODEV
+              : -ETIMEDOUT;
+    goto error;
   }
 
   if (VEL_FW_STATUS_RUNNING != status) {
     dev_info(&dev->dev, "rproc: unable to start remote processor");
-    return -EIO;
+    err = -EIO;
+    goto error;
   }
 
   // Update generation.
@@ -105,26 +118,21 @@ static int velocitor_rproc_start(struct rproc *rproc) {
   // Check ABI.
   if ((VEL_FW_ABI != readl(device->bar0 + VEL_REG_FW_ABI)) ||
       (VEL_TRACE_ENTRY !=
-       readl(device->bar2 + device->dtrace.da + VEL_TRACE_OFF_ENTRY_SIZE)))
-    return -ENODEV;
+       readl(device->bar2 + device->dtrace.da + VEL_TRACE_OFF_ENTRY_SIZE))) {
+    err = -ENODEV;
+    goto error;
+  }
 
   // Initialize vrings
-  int err = 0;
-  if ((err = velocitor_rproc_walk_rsc_table(device, rproc)))
-    return err;
+  if ((err = velocitor_rproc_walk_rsc_table(device, rproc))) {
+    goto error;
+  }
   velocitor_vring_activate(dev);
-
   return 0;
-}
 
-static int velocitor_rproc_stop(struct rproc *rproc) {
-  struct pci_dev *dev = to_pci_dev(rproc->dev.parent);
-  const struct velocitor_dev *device = pci_get_drvdata(dev);
-
-  writel(1, device->bar0 + VEL_REG_RESET);
-  writel(0, device->bar0 + VEL_REG_RSC_VALID);
-
-  return 0;
+error:
+  velocitor_rproc_stop(rproc);
+  return err;
 }
 
 static void velocitor_rproc_kick(struct rproc *rproc, int notifyid) {
