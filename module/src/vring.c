@@ -79,7 +79,7 @@ int velocitor_vring_initialize(struct pci_dev *dev) {
   int err = 0;
   struct velocitor_dev *device = pci_get_drvdata(dev);
 
-  if ((err = devm_mutex_init(&dev->dev, &device->window.lock)))
+  if ((err = devm_mutex_init(&dev->dev, &device->vring.lock)))
     return err;
 
   for (int i = 0; i < VEL_VRINGS_COUNT; ++i)
