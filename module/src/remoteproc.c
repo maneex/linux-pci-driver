@@ -12,6 +12,7 @@
 #include <velocitor_hw.h>
 
 // Driver headers.
+#include "handles.h"
 #include "remoteproc.h"
 
 static int velocitor_rproc_prepare(struct rproc *rproc) {
@@ -109,6 +110,7 @@ static int velocitor_rproc_start(struct rproc *rproc) {
 
   // Update generation.
   device->rproc.generation = readl(device->bar0 + VEL_REG_GENERATION);
+  velocitor_handles_regenerate(dev);
 
   // Where the firmware put its trace ring (spec 6.6).  Readable only now:
   // before the load, device memory still holds the reset pattern.

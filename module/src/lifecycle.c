@@ -27,7 +27,7 @@ static const struct pci_device_id pci_id_table[] = {
     }};
 MODULE_DEVICE_TABLE(pci, pci_id_table);
 
-static struct dentry *velocitor_debugfs_root = 0;
+static struct dentry *velocitor_debugfs_root = NULL;
 
 // https : // www.kernel.org/doc/html/v6.0/PCI/pci.html
 

@@ -11,6 +11,7 @@
 #include "ctrl.h"
 #include "device-trace.h"
 #include "dma.h"
+#include "handles.h"
 #include "identity.h"
 #include "vring.h"
 
@@ -47,6 +48,8 @@ struct velocitor_dev {
   // Control plane, spec 7. The table outlives the rpmsg channel on purpose;
   // see the comment on struct velocitor_ctrl.
   struct velocitor_ctrl ctrl;
+
+  struct velocitor_handles handles;
 
   struct {
     struct rproc *handle;

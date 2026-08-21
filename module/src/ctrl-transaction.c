@@ -63,7 +63,7 @@ void velocitor_ctrl_transaction_cancel(
   struct velocitor_ctrl_transaction_private *private = to_private(transaction);
 
   mutex_lock(&private->ctrl->lock);
-  idr_remove(&private->ctrl->pending, private->seq);
+  idr_remove(&private->ctrl->inflight_reqs, private->seq);
   mutex_unlock(&private->ctrl->lock);
 
   transaction->status = -ECANCELED;
@@ -106,7 +106,7 @@ int velocitor_ctrl_transaction_alloc(
   kref_init(&private->refcount);
 
   mutex_lock(&ctrl->lock);
-  seq = idr_alloc_cyclic(&ctrl->pending, &private->pub, 1, 0, GFP_KERNEL);
+  seq = idr_alloc_cyclic(&ctrl->inflight_reqs, &private->pub, 1, 0, GFP_KERNEL);
   if (seq >= 0) {
     private->seq = seq;
     private->pub.request.msg.seq = cpu_to_le32(seq);

@@ -21,7 +21,9 @@
 // https://docs.kernel.org/core-api/idr.html
 #define VELOCITOR_RPMSG_TIMEOUT_MS 500
 
-static void velocitor_ctrl_destroy(void *pending) { idr_destroy(pending); }
+static void velocitor_ctrl_destroy(void *inflight_reqs) {
+  idr_destroy(inflight_reqs);
+}
 
 static struct velocitor_dev *velocitor_ctrl_device(struct rpmsg_device *rpdev) {
   struct rproc *rproc = rproc_get_by_child(&rpdev->dev);
@@ -109,13 +111,13 @@ static void velocitor_ctrl_rpmsg_remove(struct rpmsg_device *rpdev) {
 
     mutex_lock(&ctrl->lock);
     struct velocitor_ctrl_transaction *transaction =
-        idr_get_next(&ctrl->pending, &seq);
+        idr_get_next(&ctrl->inflight_reqs, &seq);
     if (NULL == transaction) {
       mutex_unlock(&ctrl->lock);
       break;
     }
 
-    idr_remove(&ctrl->pending, seq);
+    idr_remove(&ctrl->inflight_reqs, seq);
     mutex_unlock(&ctrl->lock);
 
     transaction->status = -ESTALE;
@@ -144,7 +146,7 @@ static int velocitor_ctrl_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
   // Find the transaction in the queue.
   mutex_lock(&ctrl->lock);
   struct velocitor_ctrl_transaction *transaction =
-      idr_find(&ctrl->pending, le32_to_cpu(msg->seq));
+      idr_find(&ctrl->inflight_reqs, le32_to_cpu(msg->seq));
   if (NULL == transaction) {
     mutex_unlock(&ctrl->lock);
     dev_warn(&rpdev->dev, "rpmsg: no waiter for seq %u, dropped",
@@ -153,7 +155,7 @@ static int velocitor_ctrl_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
   }
 
   // Remove transaction from inflight queue
-  idr_remove(&ctrl->pending, le32_to_cpu(msg->seq));
+  idr_remove(&ctrl->inflight_reqs, le32_to_cpu(msg->seq));
   mutex_unlock(&ctrl->lock);
 
   // Sanity checks.
@@ -216,9 +218,9 @@ int velocitor_ctrl_initialize(struct pci_dev *dev) {
   if ((err = devm_mutex_init(&dev->dev, &device->ctrl.lock)))
     return err;
 
-  idr_init(&device->ctrl.pending);
+  idr_init(&device->ctrl.inflight_reqs);
   return devm_add_action_or_reset(&dev->dev, velocitor_ctrl_destroy,
-                                  &device->ctrl.pending);
+                                  &device->ctrl.inflight_reqs);
 }
 
 static const struct rpmsg_device_id velocitor_ctrl_rpmsg_id_table[] = {

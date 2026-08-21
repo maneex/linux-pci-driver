@@ -87,7 +87,7 @@ struct velocitor_ctrl {
   struct rpmsg_device *rpdev;
 
   struct mutex lock;
-  struct idr pending;
+  struct idr inflight_reqs;
 
   // The INFO handshake outlives probe(), so it cannot live on its stack.
   struct velocitor_ctrl_transaction *info_transaction;
