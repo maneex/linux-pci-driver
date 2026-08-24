@@ -45,6 +45,7 @@ devtools/build-qemu.sh     # QEMU 7.2.22 avec le device velocitor (~10 min)
 devtools/qtest-probe.sh    # vérifie le modèle seul, sans invité (2 s)
 devtools/build-module.sh   # module/ contre le noyau invité
 devtools/build-firmware.sh # l'image remoteproc, avec le compilateur de l'hôte
+devtools/build-runtime.sh  # libvelocitor et les outils, compilateur de l'hôte
 devtools/boot.sh           # démarre la VM, device attaché
 ```
 
