@@ -1239,6 +1239,20 @@ struct VelocitorResp {
     uint32_t engine;
 } QEMU_PACKED;
 
+/*
+ * The layout above is the contract, so it is checked against it rather than
+ * trusted: a field added here without the shared header moving stops this
+ * build instead of becoming a disagreement visible only on the wire.
+ */
+QEMU_BUILD_BUG_ON(sizeof(struct VelocitorHostRange) != VEL_HOST_RANGE_SIZE);
+QEMU_BUILD_BUG_ON(sizeof(struct VelocitorReqHdr) != VEL_REQ_HDR_SIZE);
+QEMU_BUILD_BUG_ON(sizeof(struct VelocitorCopyHdr) != VEL_COPY_HDR_SIZE);
+QEMU_BUILD_BUG_ON(sizeof(struct VelocitorResp) != VEL_RESP_SIZE);
+QEMU_BUILD_BUG_ON(offsetof(struct VelocitorCopyHdr, dev_offset) !=
+                  VEL_COPY_HDR_OFF_DEV_OFFSET);
+QEMU_BUILD_BUG_ON(offsetof(struct VelocitorResp, cycles) !=
+                  VEL_RESP_OFF_CYCLES);
+
 /* Sizes the reply buffer, the way the driver's union does on its side. */
 union VelocitorCtrlResp {
     struct VelocitorInfoResp info;

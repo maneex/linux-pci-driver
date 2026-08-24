@@ -123,6 +123,73 @@
 #define VEL_CYCLES_COPY     100u
 
 /*
+ * Wire layout of the data plane, spec section 8.3:
+ *
+ *     struct vel_host_range { __le64 dma_addr, len; };
+ *
+ *     struct vel_req_hdr  { __le32 seq, generation;
+ *                           __le16 op, flags;
+ *                           __le32 reserved; };
+ *
+ *     struct vel_copy_hdr { __le32 handle, reserved;
+ *                           __le64 dev_offset;
+ *                           struct vel_host_range host; };
+ *
+ *     struct vel_gemm_hdr { __le32 h_a, h_b, h_c, m, n, k, dtype, flags;
+ *                           struct vel_host_range host[3]; };
+ *
+ *     struct vel_resp     { __le32 seq, status;
+ *                           __le64 cycles;
+ *                           __le32 far_accesses, engine; };
+ *
+ * Sizes and offsets rather than the structures themselves, for the same
+ * reason the firmware header is given this way: this file declares no
+ * fixed-width types of its own, and the sides that read the wire already
+ * have theirs -- __leXX in the kernel, QEMU_PACKED in the model.
+ *
+ * What has to agree is exactly this: where each field sits and how long the
+ * whole is. Each side keeps its own struct and asserts it against these, so
+ * a field added on one side stops that side's build instead of turning into
+ * a disagreement nobody can see on the wire.
+ */
+#define VEL_HOST_RANGE_SIZE      0x10u
+#define VEL_HOST_RANGE_OFF_ADDR  0x00u
+#define VEL_HOST_RANGE_OFF_LEN   0x08u
+
+#define VEL_REQ_HDR_OFF_SEQ        0x00u
+#define VEL_REQ_HDR_OFF_GENERATION 0x04u
+#define VEL_REQ_HDR_OFF_OP         0x08u
+#define VEL_REQ_HDR_OFF_FLAGS      0x0Au
+#define VEL_REQ_HDR_SIZE           0x10u
+
+#define VEL_COPY_HDR_OFF_HANDLE     0x00u
+#define VEL_COPY_HDR_OFF_DEV_OFFSET 0x08u
+#define VEL_COPY_HDR_OFF_HOST       0x10u
+#define VEL_COPY_HDR_SIZE           0x20u
+
+#define VEL_GEMM_HDR_OFF_H_A    0x00u
+#define VEL_GEMM_HDR_OFF_M      0x0Cu
+#define VEL_GEMM_HDR_OFF_DTYPE  0x18u
+#define VEL_GEMM_HDR_OFF_FLAGS  0x1Cu
+#define VEL_GEMM_HDR_OFF_HOST   0x20u
+#define VEL_GEMM_HDR_SIZE       0x50u
+
+#define VEL_RESP_OFF_SEQ          0x00u
+#define VEL_RESP_OFF_STATUS       0x04u
+#define VEL_RESP_OFF_CYCLES       0x08u
+#define VEL_RESP_OFF_FAR_ACCESSES 0x10u
+#define VEL_RESP_OFF_ENGINE       0x14u
+#define VEL_RESP_SIZE             0x18u
+
+/*
+ * How many commands one engine queue may hold, section 8.3: the chain is two
+ * descriptors, so half the ring. Stated here because both sides size
+ * something on it -- the driver its slot pool, the model nothing yet, but the
+ * qtest probe its expectations.
+ */
+#define VEL_DATA_INFLIGHT   (VEL_VRING_NUM / 2u)
+
+/*
  * ctrl_caps of vel_info_resp, section 7.2.  A capability that governs ALLOC
  * belongs to the control plane, not to the data vdev's feature negotiation --
  * which is where it lived until v0.6.2.
