@@ -54,6 +54,22 @@
 #define VEL_NODE_ANY        0xFFFFFFFFu
 #define VEL_ENGINE_ANY      0xFFFFFFFFu
 
+/*
+ * Allocatable range of each node, spec section 3.2.  Stated rather than
+ * derived on each side: the fixed aperture is taken out of node 0, so the two
+ * nodes do not have the same allocatable size, and an asymmetry that both
+ * implementations have to agree on is exactly what this header is for.
+ *
+ * The spec exposes the asymmetry instead of correcting it -- STAT reports
+ * capacity and free per node (section 7.2) so that a measurement protocol
+ * cannot compare two different things without noticing.
+ */
+#define VEL_NODE_SIZE       (VEL_MEM_SIZE / VEL_NODES)
+#define VEL_NODE0_BASE      VEL_APERTURE_SIZE   /* aperture comes off node 0 */
+#define VEL_NODE0_END       VEL_NODE_SIZE
+#define VEL_NODE1_BASE      VEL_NODE_SIZE
+#define VEL_NODE1_END       VEL_MEM_SIZE
+
 /* virtio transport */
 #define VEL_VIRTIO_ID       0x4000u       /* data vdev, spec 2.3           */
 #define VEL_VRING_NUM       256u          /* descriptors per vring         */
