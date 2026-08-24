@@ -28,7 +28,7 @@ CPPFLAGS += -I. -I../uapi -I../qemu-device
 # and friends.  Both are read as-is: the whole point of a shared header is
 # that no side retypes the other's values.
 
-SRCS     := src/scan.c src/open.c src/alloc.c src/stats.c
+SRCS     := src/scan.c src/open.c src/alloc.c src/stats.c src/info.c
 OBJS     := $(SRCS:.c=.o)
 PICOBJS  := $(SRCS:.c=.lo)
 

@@ -62,6 +62,14 @@ VEL_EXPORT int velocitor_close(struct velocitor_device *device);
 VEL_EXPORT const struct velocitor_device_info *
 velocitor_info(const struct velocitor_device *device);
 
+struct velocitor_state {
+  unsigned int state;
+  unsigned int generation;
+};
+
+VEL_EXPORT int velocitor_state(const struct velocitor_device *device,
+                               struct velocitor_state *state);
+
 struct velocitor_stats {
   unsigned int live_handles;
 
