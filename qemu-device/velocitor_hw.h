@@ -93,6 +93,36 @@
 #define VEL_OP_STAT         4u
 
 /*
+ * Data plane operations, section 8.2.  Numbered from 1 like the control
+ * plane's, because the spec numbers them that way and they never travel on
+ * the same channel -- but spelled VEL_DATA_OP_* so that no line of code has
+ * to be read twice to know which plane it is on.
+ */
+#define VEL_DATA_OP_COPY_H2D 1u
+#define VEL_DATA_OP_COPY_D2H 2u
+#define VEL_DATA_OP_GEMM     3u
+
+/*
+ * Data types, section 8.3.  fp32 is what a bare split ring carries at step 8;
+ * bf16 waits for VEL_F_BF16 to be negotiated at step 11, which is the whole
+ * point of introducing the features one at a time.
+ */
+#define VEL_DTYPE_FP32      0u
+#define VEL_DTYPE_BF16      1u
+
+/*
+ * Simulated cost of one operation, annex A.5: a flat charge per operation,
+ * multiplied by VEL_FAR_PENALTY when the block sits on the node the queue's
+ * engine is far from.
+ *
+ * Relative quantities only. Section A.5 is explicit that they predict nothing
+ * about real hardware, and that every measurement of section 12 must therefore
+ * be a count or a comparison between two configurations -- an absolute figure
+ * would only measure these constants.
+ */
+#define VEL_CYCLES_COPY     100u
+
+/*
  * ctrl_caps of vel_info_resp, section 7.2.  A capability that governs ALLOC
  * belongs to the control plane, not to the data vdev's feature negotiation --
  * which is where it lived until v0.6.2.
