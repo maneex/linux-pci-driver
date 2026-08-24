@@ -1272,6 +1272,24 @@ static int velocitor_alloc_block(VelocitorState *s,
     }
     size = ROUND_UP(size, VEL_ALLOC_ALIGN);
 
+    /*
+     * Bit 5 of ERR_INJECT, section 9: the next ALLOC answers -ENOMEM whatever
+     * the free memory is.
+     *
+     * Consumed when it acts, on the precedent step 4 set for bit 6. Section 14
+     * leaves bits 0, 5 and 8 open on this question; this is the second of the
+     * three to become real, and it is answered the same way for the same
+     * reason -- an injection that stayed armed would fire on every subsequent
+     * call, and the determinism section 9 demands would survive exactly one
+     * of them. ERR_INJECT therefore reads back as "what is still armed", not
+     * "what was written", for this bit as for bit 6.
+     */
+    if (s->err_inject & VEL_ERR_INJECT_ALLOC_FAIL) {
+        s->err_inject &= ~VEL_ERR_INJECT_ALLOC_FAIL;
+        velocitor_error_set(s, VEL_ERR_NOMEM, size);
+        return -ENOMEM;
+    }
+
     if (s->next_handle > VEL_MAX_HANDLES ||
         !velocitor_alloc_pick_node(s, want, size, &node)) {
         velocitor_error_set(s, VEL_ERR_NOMEM, size);
