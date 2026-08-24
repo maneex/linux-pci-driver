@@ -36,3 +36,4 @@ runtime/src/*.lo
 runtime/*.a
 runtime/*.so
 runtime/scan-test
+runtime/ctrl-test

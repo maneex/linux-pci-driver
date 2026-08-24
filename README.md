@@ -308,6 +308,15 @@ ses propres codes de retour passerait à travers un *splat*.
 façon, avec le contrôle croisé `dropped` / `skipped` entre les deux
 implémentations.
 
+`devtools/guest-ctrl-test.sh` couvre le plan de contrôle du §7 **depuis une
+application** : il lance `runtime/ctrl-test`, qui énumère par sysfs, ouvre
+`/dev/velocitor0`, et vérifie `ALLOC`, `FREE` et `STAT` contre des oracles que
+le driver ne peut pas fabriquer — les 112 et 128 Mio allouables du §3.2, et la
+baisse exacte du libre après une allocation. Il finit par le plus important :
+un plantage firmware injecté par debugfs, la reprise du §6.5, et un `FREE` sur
+un handle d'avant qui doit rendre `-ESTALE` — le tout sans que l'application
+perde son descripteur, ce que le §10.1 promet et que le §12 item 6 réclame.
+
 ### Ce qui ne l'est pas
 
 Par étape du §13, dans l'ordre des dépendances :

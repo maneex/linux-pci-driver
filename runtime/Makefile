@@ -33,7 +33,7 @@ OBJS     := $(SRCS:.c=.o)
 PICOBJS  := $(SRCS:.c=.lo)
 
 LIBS     := libvelocitor.a libvelocitor.so
-TOOLS    := scan-test
+TOOLS    := scan-test ctrl-test
 
 all: $(LIBS) $(TOOLS)
 
@@ -52,8 +52,11 @@ libvelocitor.so: $(PICOBJS)
 # The guest test links the archive: static, because the initramfs has no
 # dynamic loader.  It reaches the VM through the 9p share, so building it is
 # enough -- there is no initramfs to rebuild.
-scan-test: scan-test.c libvelocitor.a
-	$(CC) $(CFLAGS) $(CPPFLAGS) -static -o $@ scan-test.c libvelocitor.a
+# Static, because the guest initramfs has no dynamic loader.  scan-test only
+# looks; ctrl-test crashes the firmware on purpose, so it is a conformance run
+# and not something to launch idly.
+$(TOOLS): %: %.c libvelocitor.a
+	$(CC) $(CFLAGS) $(CPPFLAGS) -static -o $@ $< libvelocitor.a
 
 clean:
 	$(RM) $(OBJS) $(PICOBJS) $(LIBS) $(TOOLS)
