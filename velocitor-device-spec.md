@@ -2210,8 +2210,11 @@ revient à parser selon ce qui a été offert et non selon ce qui a été accept
 Le modèle implémente la moitié distante du transport `virtio_rpmsg_bus` : consommation des
 *split rings*, gestion des tampons de réception fournis par Linux, construction de
 `rpmsg_hdr`, respect des adresses source et destination. Il émet l'annonce *name service*
-selon §7.1, une fois les deux vrings de vdev0 activés, et seulement si `VIRTIO_RPMSG_F_NS`
-figure dans les `gfeatures`.
+selon §7.1 — **au premier doorbell où `VIRTIO_RPMSG_F_NS` figure dans les `gfeatures` de la
+table fantôme et où un tampon de réception est disponible**, et non à l'activation des
+vrings : depuis que le §5 place la programmation de la fenêtre dans `ops->start()`,
+`gfeatures` vaut encore zéro à cet instant et la condition s'interdirait elle-même. Le §7.1
+détaille le raisonnement.
 
 ### D.6 Ce qui doit rester déterministe
 

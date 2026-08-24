@@ -177,7 +177,7 @@ ajoute `-I$(src)/../uapi`.
 
 ### Ce qui est implémenté aujourd'hui
 
-Les étapes 2 à 5 du §13 des deux côtés, et l'étape 6 côté modèle :
+Les étapes 2 à 7 du §13 des deux côtés :
 
 - identité PCI et disposition des capacités (§2.1, §3) ;
 - les trois BAR, avec type et taille contractuels ;
@@ -196,17 +196,25 @@ Les étapes 2 à 5 du §13 des deux côtés, et l'étape 6 côté modèle :
   table quand `RSC_VALID` monte (§6.4) ;
 - le cycle de vie du firmware (§4.1, §6.1, §6.5, §6.6) : `RESET`, vérification
   de l'en-tête chargé, `FW_STATUS` par 1 puis 2, `FW_ABI`, `GENERATION` ;
-- `ERR_INJECT` bits 2 et 6 (§9) : le plantage firmware, et l'écriture de
-  `WIN_BASE` avalée en silence ;
+- le transport du §4.2 : fenêtre `VQ_*` complète, `DOORBELL` routé par
+  `notifyid`, parcours des `notifyid` dans la table fantôme, balayage de
+  l'anneau `avail`, et purge des queues au reset comme au crash (D.3, §6.5) ;
+- l'anneau de trace du §6.6, que le firmware simulé alimente ;
+- l'endpoint rpmsg de l'annexe D.5 : *split rings* consommés, anneau `used`,
+  annonce *name service* du §7.1, et les quatre opérations du §7.2 — `INFO`,
+  puis `ALLOC` / `FREE` / `STAT` au-dessus d'un allocateur *bump* par nœud
+  (§3.2, §14) ;
+- `ERR_INJECT` bits 2, 5 et 6 (§9) : le plantage firmware, l'`ALLOC` qui
+  échoue, et l'écriture de `WIN_BASE` avalée en silence — les trois consommés
+  quand ils agissent ;
 - les règles d'accès du §4 : 32 bits alignés uniquement, sinon `0xFFFFFFFF` en
   lecture et écriture ignorée ; offset non implémenté → lecture 0 ; et les
   registres WO du §A.3 rendent `0xFFFFFFFF` quand on les lit.
 
 Tout le reste de BAR0 répond comme réservé et journalise sous `LOG_UNIMP` en
-nommant la section de spec qui l'implémentera. Du bloc d'erreur qualifiée du
-§4.4, seuls `ERR_CODE` et `ERR_INFO_*` existent, remplis par le DMA, la table
-fantôme et la vérification de l'en-tête firmware. Aucune queue n'est
-programmable et rien ne consomme d'anneau.
+nommant la section de spec qui l'implémentera. Le bloc d'erreur qualifiée du
+§4.4 est complet, `ERR_DROPPED` compris — celui qui rend visible ce que le
+driver n'a pas vu.
 
 Pour voir ces journaux :
 
@@ -225,7 +233,7 @@ C'est la **couche 1 du §13.1** — le device QEMU sans Linux. L'accélérateur
 script programme les BAR à la main par les ports de configuration
 `0xcf8`/`0xcfc`, relit les registres et compare à des valeurs attendues.
 
-Ce qu'il couvre aujourd'hui, en 96 cas : le bloc d'identité, la relecture
+Ce qu'il couvre aujourd'hui, en 163 cas : le bloc d'identité, la relecture
 inversée de `SCRATCH`, les quatre règles d'accès du §4 (1 octet, 8 octets, non
 aligné, offset réservé), le rejet d'une écriture sur registre en lecture seule,
 le bloc de compteurs et ses deux registres en écriture seule, la capacité MSI-X
@@ -233,7 +241,13 @@ et ses deux champs BIR lus en espace de configuration, le cycle de l'étape 3 �
 injection, `FW_STATUS = 3`, latch du vecteur 5, `IRQ_ACK`, retour à zéro — la
 fenêtre glissante avec sa relecture obligatoire et ses deux rejets, un
 aller-retour DMA complet avec le piège des 42 bits, la table fantôme et ses
-refus, et le cycle de vie du firmware jusqu'à `GENERATION`.
+refus, le cycle de vie du firmware jusqu'à `GENERATION`, le transport entier —
+parcours des `notifyid`, fenêtre `VQ_*`, routage du `DOORBELL`, balayage de
+l'`avail`, purge au reset — l'annonce *name service* vérifiée octet par octet,
+et le plan de contrôle de bout en bout : `ALLOC` avec son `dev_offset` au bas
+du nœud 0, `STAT` et l'asymétrie 112/128 Mio du §3.2, `FREE` puis le même
+`FREE` refusé en `ERR_CODE = 3`, et le bit 5 d'`ERR_INJECT` qui se désarme
+entre deux allocations.
 
 Deux de ces cas ne se remarquent pas et portent pourtant l'essentiel.
 `CNT_NOTIFY_TX` lit `0` avant `CNT_SNAP` et `1` après, sur le même compteur
@@ -289,24 +303,27 @@ l'autre. Il finit par une passe de *fuzzing* dont `SEED` et `FUZZ` sont des
 variables d'environnement, et un `grep` de `dmesg` — un test qui ne lit que
 ses propres codes de retour passerait à travers un *splat*.
 
+`devtools/guest-trace-test.sh` couvre l'anneau de trace du §6.6 de la même
+façon, avec le contrôle croisé `dropped` / `skipped` entre les deux
+implémentations.
+
 ### Ce qui ne l'est pas
 
 Par étape du §13, dans l'ordre des dépendances :
 
 | Étape | Manque côté modèle |
 |---|---|
-| 6 | `DOORBELL`, écriture d'entrées dans l'anneau de trace, lecture des `notifyid` dans la table fantôme (§4.1, §6.4, §6.6) |
-| 7 | fenêtre `VQ_*` (§4.2), endpoint rpmsg et annonce *name service* (§7.1, annexe D.5) |
-| 8 | consommation des *split rings*, moteurs GEMM (§8) |
-| 9 | le reste de l'erreur qualifiée (§4.4 au-delà d'`ERR_CODE`/`ERR_INFO_*`) et les huit autres bits d'`ERR_INJECT` (§9) |
+| 8 | vdev1 en *split ring* nu, `COPY_H2D` / `COPY_D2H`, moteurs GEMM et leur oracle (§8) |
+| 13 | les six autres bits d'`ERR_INJECT` (§9), et le désarmement des bits 0 et 8 reste un point ouvert du §14 |
 
-Les étapes 4 et 5 sont faites côté modèle, et l'étape 6 l'est pour tout ce dont
-le driver a besoin pour démarrer un firmware.
+Côté driver, il reste de l'étape 7 le croisement `CAPS` / `INFO` du §7.3 et
+son entrée debugfs `mismatch` (§11) ; et rien n'a encore exercé le chemin
+`ALLOC` / `FREE` depuis l'espace utilisateur, ce que `runtime/` va donner.
 
 ## Divergences et décisions à valider
 
 Deux points sur lesquels le code prend position ; les noter au §16 quand ils
-sont tranchés. Les décisions déjà tranchées pendant les étapes 2 à 6 y sont
+sont tranchés. Les décisions déjà tranchées pendant les étapes 2 à 7 y sont
 consignées.
 
 1. **`VERSION` n'est pas fixé par la spec.** Le modèle rend `0.6`
