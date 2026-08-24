@@ -636,20 +636,132 @@ CHECKS=(
     # Back to queue 0, which is what the checks below assume is selected.
     "VQ_SELECT = 0             |writel $((BAR0 + 0x100)) 0x00000000|"
 
+    # ---- Data plane: COPY_H2D and COPY_D2H (spec 8.2, 8.3) --------------
+    #
+    # Handle 2 is still live from the block above, 4096 bytes at 16 MiB + 4K
+    # on node 0.  Queue 2 is engineq0, so the block is local to the engine
+    # serving it and no far penalty applies -- which is what makes the cycle
+    # count below a fixed number and not a guess.
+    #
+    # The check that matters is the cross one: the bytes go in through the
+    # copy engine and come back out through the sliding window, two disjoint
+    # paths to the same memory. An arithmetic error in one cannot cancel
+    # itself out in the other, which a plain write-then-read-back would let it
+    # do. Same discipline as guest-dma-test.sh.
+
+    "engineq0 desc @0x1290000  |writel $((BAR0 + 0x100)) 0x00000002|"
+    "VQ_DESC_LO                |writel $((BAR0 + 0x110)) 0x01290000|"
+    "VQ_AVAIL_LO               |writel $((BAR0 + 0x118)) 0x01280000|"
+    "VQ_USED_LO                |writel $((BAR0 + 0x120)) 0x012a0000|"
+    "VQ_NUM = 256              |writel $((BAR0 + 0x108)) 0x00000100|"
+    "VQ_MSIX_VECTOR = 3        |writel $((BAR0 + 0x128)) 0x00000003|"
+    "VQ_ENABLE = 1             |writel $((BAR0 + 0x10c)) 0x00000001|"
+
+    # Eight bytes of host data, and a chain of two: one the device reads,
+    # one it writes (spec 8.3).
+    "host payload              |write 0x12d0000 8 0xfeedface5a5aa5a5|"
+    "desc[0] -> request        |write 0x1290000 8 0x00002b0100000000|"
+    "desc[0].len = 48          |write 0x1290008 4 0x30000000|"
+    "desc[0].flags = NEXT      |write 0x129000c 2 0x0100|"
+    "desc[0].next = 1          |write 0x129000e 2 0x0100|"
+    "desc[1] -> response       |write 0x1290010 8 0x00002c0100000000|"
+    "desc[1].len = 24          |write 0x1290018 4 0x18000000|"
+    "desc[1].flags = WRITE     |write 0x129001c 2 0x0200|"
+
+    # vel_req_hdr then vel_copy_hdr.  GENERATION is 2 here, and a request
+    # carrying anything else is refused by spec 6.5 -- checked further down.
+    "req.seq = 1               |write 0x12b0000 4 0x01000000|"
+    "req.generation = 2        |write 0x12b0004 4 0x02000000|"
+    "req.op = COPY_H2D         |write 0x12b0008 2 0x0100|"
+    "copy.handle = 2           |write 0x12b0010 4 0x02000000|"
+    "copy.dev_offset = 0       |write 0x12b0018 8 0x0000000000000000|"
+    "copy.host.dma_addr        |write 0x12b0020 8 0x00002d0100000000|"
+    "copy.host.len = 8         |write 0x12b0028 8 0x0800000000000000|"
+
+    "publish it                |write 0x1280004 2 0x0000|"
+    "avail.idx = 1             |write 0x1280002 2 0x0100|"
+    "ring the doorbell, id 2   |writel $((BAR0 + 0x34)) 0x00000002|"
+    "let virtual time pass     |clock_step 2000|"
+
+    "resp.seq = 1              |read 0x12c0000 4|0x01000000"
+    "resp.status = 0           |read 0x12c0004 4|0x00000000"
+    "resp.cycles = 100, local  |read 0x12c0008 8|0x6400000000000000"
+    "resp.far_accesses = 0     |read 0x12c0010 4|0x00000000"
+    "resp.engine = 0           |read 0x12c0014 4|0x00000000"
+    "used.idx = 1              |read 0x12a0002 2|0x0100"
+    "used.ring[0].len = 24     |read 0x12a0008 4|0x18000000"
+
+    # The cross-check.  Handle 2 lives at 16 MiB + 4K; the window is already
+    # parked at 16 MiB from the section above, so the block shows up at
+    # window offset 0x1000 -- and the eight bytes are the ones the engine
+    # wrote, seen through an entirely different path.
+    "GENERATION here           |readl $((BAR0 + 0x3c))|0x0000000000000002"
+    "arm WIN_BASE = 16 MiB     |writel $((BAR0 + 0x24)) 0x01000000|"
+    "read it back to move it   |readl $((BAR0 + 0x24))|0x0000000001000000"
+    "the copied bytes, word 0  |readl $((BAR2 + 0x1001000))|0x00000000cefaedfe"
+    "the copied bytes, word 1  |readl $((BAR2 + 0x1001004))|0x00000000a5a55a5a"
+
+    # And back out, into a host address the H2D never touched.
+    "req2.seq = 2              |write 0x12b1000 4 0x02000000|"
+    "req2.generation = 2       |write 0x12b1004 4 0x02000000|"
+    "req2.op = COPY_D2H        |write 0x12b1008 2 0x0200|"
+    "copy2.handle = 2          |write 0x12b1010 4 0x02000000|"
+    "copy2.host.dma_addr       |write 0x12b1020 8 0x00002e0100000000|"
+    "copy2.host.len = 8        |write 0x12b1028 8 0x0800000000000000|"
+    "desc[2] -> request 2      |write 0x1290020 8 0x00102b0100000000|"
+    "desc[2].len = 48          |write 0x1290028 4 0x30000000|"
+    "desc[2].flags = NEXT      |write 0x129002c 2 0x0100|"
+    "desc[2].next = 3          |write 0x129002e 2 0x0300|"
+    "desc[3] -> response 2     |write 0x1290030 8 0x00102c0100000000|"
+    "desc[3].len = 24          |write 0x1290038 4 0x18000000|"
+    "desc[3].flags = WRITE     |write 0x129003c 2 0x0200|"
+    "publish it                |write 0x1280006 2 0x0200|"
+    "avail.idx = 2             |write 0x1280002 2 0x0200|"
+    "ring the doorbell, id 2   |writel $((BAR0 + 0x34)) 0x00000002|"
+    "let virtual time pass     |clock_step 2000|"
+
+    "resp2.seq = 2, answered   |read 0x12c1000 4|0x02000000"
+    "resp2.status = 0          |read 0x12c1004 4|0x00000000"
+    "the round trip, word 0    |read 0x12e0000 4|0xfeedface"
+    "the round trip, word 1    |read 0x12e0004 4|0x5a5aa5a5"
+
+    # A stale generation is refused, spec 6.5.  Same chain, one field wrong.
+    "req3.seq = 3              |write 0x12b2000 4 0x03000000|"
+    "req3.generation = 1       |write 0x12b2004 4 0x01000000|"
+    "req3.op = COPY_H2D        |write 0x12b2008 2 0x0100|"
+    "copy3.handle = 2          |write 0x12b2010 4 0x02000000|"
+    "copy3.host.len = 8        |write 0x12b2028 8 0x0800000000000000|"
+    "desc[4] -> request 3      |write 0x1290040 8 0x00202b0100000000|"
+    "desc[4].len = 48          |write 0x1290048 4 0x30000000|"
+    "desc[4].flags = NEXT      |write 0x129004c 2 0x0100|"
+    "desc[4].next = 5          |write 0x129004e 2 0x0500|"
+    "desc[5] -> response 3     |write 0x1290050 8 0x00202c0100000000|"
+    "desc[5].len = 24          |write 0x1290058 4 0x18000000|"
+    "desc[5].flags = WRITE     |write 0x129005c 2 0x0200|"
+    "publish it                |write 0x1280008 2 0x0400|"
+    "avail.idx = 3             |write 0x1280002 2 0x0300|"
+    "ring the doorbell, id 2   |writel $((BAR0 + 0x34)) 0x00000002|"
+    "let virtual time pass     |clock_step 2000|"
+    "resp3.seq = 3, answered   |read 0x12c2000 4|0x03000000"
+    "resp3.status = -ESTALE    |read 0x12c2004 4|0x8cffffff"
+    "ERR_CODE = 9 (stale)      |readl $((BAR0 + 0x50))|0x0000000000000009"
+
+    "back to queue 0           |writel $((BAR0 + 0x100)) 0x00000000|"
+
     # Annex D.3: RESET purges the window and invalidates the table.  This is
     # what makes the driver reprogram both on every start -- and what makes a
     # recovery that forgets to do so fail loudly instead of going quiet.
     #
-    # CNT_DESC is 15 by now: the announcement's buffer, then seven requests
-    # and their seven replies.  What the last check asserts is that the
-    # doorbell after the reset adds none of its own.
+    # CNT_DESC is 18 by now: the announcement's buffer, seven control requests
+    # and their seven replies, then three data-plane chains.  What the last
+    # check asserts is that the doorbell after the reset adds none of its own.
     "assert RESET              |writel $((BAR0 + 0x1c)) 0x00000001|"
     "queue 0 is disabled       |readl $((BAR0 + 0x10c))|0x0000000000000000"
     "RSC_VALID cleared with it |readl $((BAR0 + 0xfc))|0x0000000000000000"
     "the ring addresses stay   |readl $((BAR0 + 0x118))|0x0000000001200000"
     "doorbell after reset      |writel $((BAR0 + 0x34)) 0x00000000|"
     "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
-    "counted but not swept     |readl $((BAR0 + 0xa8))|0x000000000000000f"
+    "counted but not swept     |readl $((BAR0 + 0xa8))|0x0000000000000012"
 )
 
 commands=("${SETUP[@]}")
