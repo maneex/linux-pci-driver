@@ -15,7 +15,7 @@ velocitor-y += src/ctrl-transaction.o
 velocitor-y += src/handles.o
 velocitor-y += src/cdev.o
 
-ccflags-y += -I$(src)/include -I$(src)/../qemu-device/ -I$(src)/src
+ccflags-y += -I$(src)/../uapi -I$(src)/../qemu-device/ -I$(src)/src
 # rproc_elf_* are exported but declared in the remoteproc core's private header.
 ccflags-y += -I$(srctree)/drivers/remoteproc
 

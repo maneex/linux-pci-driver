@@ -15,7 +15,9 @@ spec.
 | Répertoire | Contenu | Écrit par |
 |---|---|---|
 | `qemu-device/` | le modèle QEMU : périphérique, firmware simulé, moteurs, compteurs | intervenant « modèle » (§0.6) |
-| `module/` | `velocitor_pci` : driver noyau, remoteproc, rpmsg, virtio, UAPI | intervenant « driver » (§0.6) |
+| `module/` | `velocitor_pci` : driver noyau, remoteproc, rpmsg, virtio | intervenant « driver » (§0.6) |
+| `uapi/` | `velocitor.h` : le contrat de `/dev/velocitor` (§10.2), gelé, partagé par le module et le runtime | intervenant « driver » (§0.6) |
+| `runtime/` | `libvelocitor` et les outils qui parlent au char device (§10.3, §10.4) | intervenant « driver » (§0.6) |
 | `firmware/` | l'image que remoteproc charge : en-tête du §6.6 et table de ressources du §6.3, générées — aucun code exécutable | intervenant « modèle » (§0.6) |
 | `devtools/` | environnement de compilation et d'exécution en VM | commun |
 | `vm/` | images de VM (hors dépôt) | — |
@@ -162,6 +164,16 @@ il ne dépend d'aucun en-tête QEMU, noyau ou libc, précisément pour pouvoir
 être consommé tel quel par les trois côtés. Le driver l'a adopté :
 `module/include/pci.h` a disparu, et `module/Makefile` ajoute
 `-I$(src)/../qemu-device/`.
+
+**Le second en-tête partagé est `uapi/velocitor.h`**, et il ne décrit pas la
+même frontière : `velocitor_hw.h` est le contrat du *périphérique*, celui-ci
+est le contrat de l'*appel système* (§10.2). Il est à la racine plutôt que
+dans `module/` parce que ses consommateurs finissent par être des programmes
+ordinaires — `libvelocitor`, `velocitor-top` — et qu'une bibliothèque n'a rien
+à aller chercher dans l'arbre source d'un module noyau. C'est exactement la
+raison pour laquelle le noyau *installe* ses en-têtes UAPI au lieu d'exporter
+son arbre. `module/include/` a donc disparu à son tour, et `module/Makefile`
+ajoute `-I$(src)/../uapi`.
 
 ### Ce qui est implémenté aujourd'hui
 

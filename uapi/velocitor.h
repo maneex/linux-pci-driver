@@ -1,3 +1,6 @@
+/*
+ * UAPI of /dev/velocitor
+ */
 #ifndef VELOCITOR_H
 #define VELOCITOR_H
 
