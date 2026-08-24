@@ -1201,6 +1201,44 @@ struct VelocitorStatResp {
     uint32_t reserved;
 } QEMU_PACKED;
 
+/*
+ * The data plane's wire format, spec section 8.3.
+ *
+ * In v1 the ring carries only the small command and response structures: the
+ * data itself stays in the host's coherent pool and its bus address travels
+ * inside the command. The device therefore reads and writes it directly, in
+ * bus-master, rather than through a scatterlist -- section 8.3 explains that
+ * putting a coherent buffer into a chain would have it remapped as a
+ * streaming one, two DMA models mixed for nothing.
+ */
+struct VelocitorHostRange {
+    uint64_t dma_addr;
+    uint64_t len;
+} QEMU_PACKED;
+
+struct VelocitorReqHdr {
+    uint32_t seq;
+    uint32_t generation;
+    uint16_t op;
+    uint16_t flags;
+    uint32_t reserved;
+} QEMU_PACKED;
+
+struct VelocitorCopyHdr {
+    uint32_t handle;
+    uint32_t reserved;
+    uint64_t dev_offset;
+    struct VelocitorHostRange host;
+} QEMU_PACKED;
+
+struct VelocitorResp {
+    uint32_t seq;
+    uint32_t status;
+    uint64_t cycles;
+    uint32_t far_accesses;
+    uint32_t engine;
+} QEMU_PACKED;
+
 /* Sizes the reply buffer, the way the driver's union does on its side. */
 union VelocitorCtrlResp {
     struct VelocitorInfoResp info;
@@ -1490,6 +1528,57 @@ static void velocitor_vq_refresh_negotiation(VelocitorState *s, unsigned q)
  * speaking a protocol this endpoint does not implement, and saying so is
  * more useful than following it into the data plane of section 8.
  */
+/*
+ * Read one descriptor of a queue by index.
+ *
+ * Split out from the pop because the data plane walks a chain of two
+ * (spec 8.3) where rpmsg only ever lends a single buffer: the same read,
+ * asked for a different reason.
+ */
+static bool velocitor_vq_desc(VelocitorState *s, unsigned q, uint16_t index,
+                              struct vring_desc *out)
+{
+    VelocitorQueue *vq = &s->vq[q];
+    uint64_t desc = ((uint64_t)vq->desc_hi << 32) | vq->desc_lo;
+
+    if (index >= vq->num) {
+        velocitor_error_qualify(s, VEL_ERR_BAD_DESC, index, vq->notifyid, 0);
+        velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+        return false;
+    }
+
+    return velocitor_vq_host_read(s, q, desc + index * sizeof(*out),
+                                  out, sizeof(*out));
+}
+
+/* Take the next published head, without looking at what it points to. */
+static bool velocitor_vq_pop_head(VelocitorState *s, unsigned q, uint16_t *head)
+{
+    VelocitorQueue *vq = &s->vq[q];
+    uint64_t avail = ((uint64_t)vq->avail_hi << 32) | vq->avail_lo;
+    uint16_t idx, slot, raw;
+
+    if (!velocitor_vq_host_read(s, q, avail + VEL_AVAIL_OFF_IDX,
+                                &raw, sizeof(raw))) {
+        return false;
+    }
+    idx = le16_to_cpu(raw);
+    if (idx == (uint16_t)vq->last_avail) {
+        return false;
+    }
+
+    slot = (uint16_t)vq->last_avail % vq->num;
+    if (!velocitor_vq_host_read(s, q, avail + VEL_AVAIL_OFF_RING + 2u * slot,
+                                &raw, sizeof(raw))) {
+        return false;
+    }
+    *head = le16_to_cpu(raw);
+
+    vq->last_avail = (uint16_t)(vq->last_avail + 1);
+    s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_DESC)]++;
+    return true;
+}
+
 static bool velocitor_vq_pop(VelocitorState *s, unsigned q, uint16_t *head,
                              uint64_t *addr, uint32_t *len)
 {
@@ -1817,6 +1906,242 @@ static void velocitor_rpmsg_drain(VelocitorState *s)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Data plane -- spec section 8                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Which engine serves a queue, spec section 8: one queue per engine, and the
+ * queue index is what decides. Engine 0 is near node 0 and engine 1 near
+ * node 1 (section 3.2), so the queue a command was submitted on is also what
+ * says whether its block is local or remote.
+ */
+static unsigned velocitor_queue_engine(unsigned q)
+{
+    return q - VEL_VQ_ENGINE0;
+}
+
+/*
+ * Resolve a handle for the data plane, spec sections 7.2 and 4.4.
+ *
+ * Zero is not an error here: section 8.3 makes it the "not resident"
+ * sentinel, meaning the operand is read straight from host memory. The copies
+ * of step 8 always name a real block, so they refuse it -- the sentinel
+ * belongs to GEMM's host[] fallback.
+ */
+static const VelocitorAlloc *velocitor_data_handle(VelocitorState *s,
+                                                   unsigned q, uint32_t handle)
+{
+    if (handle == 0 || handle >= s->next_handle ||
+        !s->alloc[handle - 1].live) {
+        velocitor_error_qualify(s, VEL_ERR_BAD_HANDLE, 0,
+                                s->vq[q].notifyid, handle);
+        return NULL;
+    }
+
+    return &s->alloc[handle - 1];
+}
+
+/*
+ * Charge one operation to its engine, annex A.5.
+ *
+ * A flat cost per operation, multiplied by VEL_FAR_PENALTY when the block is
+ * on the node this engine is far from. Nothing warns the driver: section 9
+ * says the cost of a remote access never surfaces anywhere but in
+ * CNT_FAR_ACCESS and in vel_resp.far_accesses, so a placement mistake is
+ * something you measure rather than something you are told.
+ */
+static uint64_t velocitor_data_charge(VelocitorState *s, unsigned engine,
+                                      unsigned node, uint32_t *far)
+{
+    uint64_t cycles = VEL_CYCLES_COPY;
+
+    if (node != engine) {
+        cycles *= VEL_FAR_PENALTY;
+        s->cnt[VEL_CNT_INDEX(VEL_REG_CNT_FAR_ACCESS)]++;
+        *far = 1;
+    }
+
+    s->cnt[VEL_CNT_INDEX(engine == 0 ? VEL_REG_CNT_CYCLES_E0
+                                     : VEL_REG_CNT_CYCLES_E1)] += cycles;
+    return cycles;
+}
+
+/*
+ * One COPY_H2D or COPY_D2H, spec section 8.2.
+ *
+ * Returns the errno that goes into vel_resp.status. Section 4.4 calls these
+ * errors synchronous: they travel back in the response and do not interrupt
+ * the device, but they still latch the qualified error block, which is what
+ * leaves something to read when a run goes wrong.
+ */
+static int velocitor_data_copy(VelocitorState *s, unsigned q, uint16_t op,
+                               const struct VelocitorCopyHdr *hdr,
+                               uint64_t *cycles, uint32_t *far)
+{
+    unsigned engine = velocitor_queue_engine(q);
+    uint64_t dev_offset = le64_to_cpu(hdr->dev_offset);
+    uint64_t iova = le64_to_cpu(hdr->host.dma_addr);
+    uint64_t len = le64_to_cpu(hdr->host.len);
+    const VelocitorAlloc *block;
+    uint64_t end;
+    uint8_t *mem;
+
+    block = velocitor_data_handle(s, q, le32_to_cpu(hdr->handle));
+    if (block == NULL) {
+        return -EINVAL;
+    }
+
+    /*
+     * Checked in unsigned arithmetic that cannot wrap: the driver validates
+     * this too (section 10.2), and the doubling is deliberate -- section 9
+     * makes the model a peer that may lie, so neither side may take the
+     * other's bounds on trust.
+     */
+    if (uadd64_overflow(dev_offset, len, &end) || end > block->size) {
+        velocitor_error_qualify(s, VEL_ERR_OUT_OF_BOUNDS, dev_offset,
+                                s->vq[q].notifyid, le32_to_cpu(hdr->handle));
+        return -EINVAL;
+    }
+
+    if (len == 0) {
+        return -EINVAL;
+    }
+
+    *cycles = velocitor_data_charge(s, engine, block->node, far);
+
+    mem = (uint8_t *)memory_region_get_ram_ptr(&s->mem) + block->offset +
+          dev_offset;
+
+    if (op == VEL_DATA_OP_COPY_H2D) {
+        if (!velocitor_vq_host_read(s, q, iova, mem, len)) {
+            return -EIO;
+        }
+    } else {
+        if (!velocitor_vq_host_write(s, q, iova, mem, len)) {
+            return -EIO;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Consume everything published on an engine queue, spec section 8.3.
+ *
+ * The chain is exactly two descriptors: one the device reads, carrying the
+ * request, and one it writes, carrying the response. Anything else is a
+ * malformed descriptor -- a fatal error of section 4.4, because a device that
+ * guessed at a chain it does not understand would be reading host memory at
+ * an address nobody chose.
+ */
+static void velocitor_engine_drain(VelocitorState *s, unsigned q)
+{
+    uint8_t buffer[sizeof(struct VelocitorReqHdr) +
+                   sizeof(struct VelocitorCopyHdr)];
+    uint16_t head;
+
+    while (velocitor_vq_pop_head(s, q, &head)) {
+        struct vring_desc in, out;
+        struct VelocitorReqHdr req;
+        struct VelocitorResp resp;
+        uint64_t cycles = 0;
+        uint32_t far = 0;
+        uint16_t op;
+        int err;
+
+        if (!velocitor_vq_desc(s, q, head, &in)) {
+            return;
+        }
+
+        /* Read then write, and never the other way round. */
+        if (!(le16_to_cpu(in.flags) & VRING_DESC_F_NEXT) ||
+            (le16_to_cpu(in.flags) & VRING_DESC_F_WRITE) ||
+            le32_to_cpu(in.len) < sizeof(req) ||
+            le32_to_cpu(in.len) > sizeof(buffer)) {
+            velocitor_error_qualify(s, VEL_ERR_BAD_DESC, le32_to_cpu(in.len),
+                                    s->vq[q].notifyid, 0);
+            velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+            velocitor_vq_push(s, q, head, 0);
+            continue;
+        }
+
+        if (!velocitor_vq_desc(s, q, le16_to_cpu(in.next), &out)) {
+            return;
+        }
+
+        if (!(le16_to_cpu(out.flags) & VRING_DESC_F_WRITE) ||
+            le32_to_cpu(out.len) < sizeof(resp)) {
+            velocitor_error_qualify(s, VEL_ERR_BAD_DESC, le32_to_cpu(out.len),
+                                    s->vq[q].notifyid, 0);
+            velocitor_raise(s, VEL_IRQ_VEC_ERROR);
+            velocitor_vq_push(s, q, head, 0);
+            continue;
+        }
+
+        if (!velocitor_vq_host_read(s, q, le64_to_cpu(in.addr), buffer,
+                                    le32_to_cpu(in.len))) {
+            return;
+        }
+        memcpy(&req, buffer, sizeof(req));
+        op = le16_to_cpu(req.op);
+
+        /*
+         * Section 6.5: an operation carrying a stale generation is refused
+         * rather than served. Without this the handle of a previous session
+         * would name whatever the allocator has since put at the same index,
+         * which is the ABA the whole {generation, handle} pair exists to stop.
+         */
+        if (le32_to_cpu(req.generation) != s->generation) {
+            velocitor_error_qualify(s, VEL_ERR_STALE,
+                                    le32_to_cpu(req.generation),
+                                    s->vq[q].notifyid, 0);
+            err = -ESTALE;
+        } else {
+            switch (op) {
+            case VEL_DATA_OP_COPY_H2D:
+            case VEL_DATA_OP_COPY_D2H:
+                if (le32_to_cpu(in.len) <
+                    sizeof(req) + sizeof(struct VelocitorCopyHdr)) {
+                    err = -EINVAL;
+                    break;
+                }
+                err = velocitor_data_copy(
+                    s, q, op,
+                    (const struct VelocitorCopyHdr *)(buffer + sizeof(req)),
+                    &cycles, &far);
+                break;
+
+            default:
+                qemu_log_mask(LOG_UNIMP,
+                              "velocitor: data op %u on queue %u -- not "
+                              "implemented (spec 8.2)\n", op, q);
+                err = -ENOSYS;
+                break;
+            }
+        }
+
+        memset(&resp, 0, sizeof(resp));
+        resp.seq = req.seq;
+        resp.status = cpu_to_le32((uint32_t)err);
+        resp.cycles = cpu_to_le64(cycles);
+        resp.far_accesses = cpu_to_le32(far);
+        resp.engine = cpu_to_le32(velocitor_queue_engine(q));
+
+        if (!velocitor_vq_host_write(s, q, le64_to_cpu(out.addr), &resp,
+                                     sizeof(resp))) {
+            return;
+        }
+
+        velocitor_trace(s, err ? VEL_TRACE_LEVEL_ERROR : VEL_TRACE_LEVEL_INFO,
+                        velocitor_queue_engine(q), le32_to_cpu(req.seq),
+                        "data op %u, status %d, %" PRIu64 " cycle(s)",
+                        op, err, cycles);
+
+        velocitor_vq_push(s, q, head, sizeof(resp));
+    }
+}
+
 /*
  * Sweep one queue after a doorbell, or at activation.
  *
@@ -1863,6 +2188,12 @@ static void velocitor_vq_sweep(VelocitorState *s, unsigned q)
             (vq->gfeatures & (1u << VEL_VIRTIO_RPMSG_F_NS))) {
             velocitor_rpmsg_announce(s);
         }
+        return;
+    }
+
+    /* The engine queues carry the data plane of section 8. */
+    if (q == VEL_VQ_ENGINE0 || q == VEL_VQ_ENGINE1) {
+        velocitor_engine_drain(s, q);
         return;
     }
 
