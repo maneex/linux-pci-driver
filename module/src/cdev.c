@@ -1,7 +1,9 @@
 // Linux headers.
+#include <linux/build_bug.h>
 #include <linux/fs.h>
 
 // Driver headers.
+#include "cdev-sysfs.h"
 #include "cdev.h"
 #include "counters.h"
 #include "ctrl-transaction.h"
@@ -11,6 +13,16 @@
 // https://www.kernel.org/doc/html/v5.6/driver-api/infrastructure.html
 // https://linux-kernel-labs.github.io/refs/heads/master/labs/device_model.html?highlight=device_create
 // https://docs.kernel.org/dev-tools/checkuapi.html
+
+/*
+ * The UAPI shapes its structures for VEL_UAPI_NODES, which is frozen; the
+ * hardware has VEL_NODES, which is not. They have to agree, and this is where
+ * that is checked -- once, at build time. The day the model gains a node this
+ * stops the build, which is the point: the alternative is an ABI that changes
+ * size under already-compiled binaries without a line of uapi/ being touched.
+ */
+static_assert(VEL_UAPI_NODES == VEL_NODES,
+              "the UAPI node count no longer matches the hardware");
 
 static void velocitor_cdev_unregister_region(void *dn) {
   dev_t *devno = dn;
@@ -90,10 +102,10 @@ static long int velocitor_cdev_ioctl_stats(struct velocitor_dev *device,
     return err;
 
   transaction->request.msg.op = cpu_to_le16(VEL_OP_STAT);
-  if ((err = velocitor_ctrl_transaction_wait(transaction)))
+  if ((err = velocitor_ctrl_transaction_send(&device->ctrl, transaction)))
     goto out;
 
-  if ((err = velocitor_ctrl_transaction_send(&device->ctrl, transaction)))
+  if ((err = velocitor_ctrl_transaction_wait(transaction)))
     goto out;
 
   struct velocitor_ioctl_stats stats = {};
@@ -234,8 +246,9 @@ int velocitor_cdev_initialize(struct pci_dev *dev) {
                                       &device->cdev.cdev)))
     return err;
 
-  device->cdev.device = device_create(
-      device->cdev.class, NULL, device->cdev.devno, NULL, KBUILD_MODNAME "0");
+  device->cdev.device = device_create_with_groups(
+      device->cdev.class, &dev->dev, device->cdev.devno, device,
+      velocitor_cdev_groups, KBUILD_MODNAME "0");
   if (IS_ERR(device->cdev.device))
     return PTR_ERR(device->cdev.device);
   if ((err = devm_add_action_or_reset(&dev->dev, velocitor_cdev_destroy_device,
