@@ -59,9 +59,8 @@ void velocitor_handles_regenerate(struct pci_dev *dev) {
   xa_unlock(&device->handles.entries);
 }
 
-int velocitor_handles_insert(struct pci_dev *dev, u64 size,
-                             const struct velocitor_ctrl_alloc_resp *resp,
-                             struct velocitor_handle **dstentry) {
+int velocitor_handles_insert(struct velocitor_dev *device, u64 size,
+                             const struct velocitor_ctrl_alloc_resp *resp) {
   struct velocitor_handle *entry =
       kzalloc(sizeof(struct velocitor_handle), GFP_KERNEL);
   if (NULL == entry)
@@ -76,7 +75,6 @@ int velocitor_handles_insert(struct pci_dev *dev, u64 size,
   entry->created = jiffies;
 
   int err = 0;
-  struct velocitor_dev *device = pci_get_drvdata(dev);
   xa_lock(&device->handles.entries);
   if (le32_to_cpu(resp->generation) != device->handles.generation) {
     err = -ESTALE;
@@ -88,7 +86,6 @@ int velocitor_handles_insert(struct pci_dev *dev, u64 size,
     goto error;
   xa_unlock(&device->handles.entries);
 
-  *dstentry = entry;
   return 0;
 
 error:
@@ -97,17 +94,19 @@ error:
   return err;
 }
 
-int velocitor_handles_erase(struct pci_dev *dev,
-                            struct velocitor_handle *entry) {
-  if (NULL == entry)
+int velocitor_handles_erase(struct velocitor_dev *device, u32 generation,
+                            u32 handle) {
+  xa_lock(&device->handles.entries);
+  if (generation != device->handles.generation) {
+    xa_unlock(&device->handles.entries);
+    return -ESTALE;
+  }
+  struct velocitor_handle *it = __xa_erase(&device->handles.entries, handle);
+  xa_unlock(&device->handles.entries);
+
+  if (NULL == it)
     return -EINVAL;
 
-  struct velocitor_dev *device = pci_get_drvdata(dev);
-  struct velocitor_handle *it =
-      xa_erase(&device->handles.entries, entry->handle);
-  if (entry != it)
-    return -ESTALE;
-
-  velocitor_handles_release(entry);
+  velocitor_handles_release(it);
   return 0;
 }

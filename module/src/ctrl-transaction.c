@@ -28,7 +28,7 @@ struct velocitor_ctrl_transaction_private {
   struct completion *async;
 
   // Pointer to callback if asnyc, null otherwise.
-  void (*callback)(struct rpmsg_device *rpdev,
+  void (*callback)(struct velocitor_ctrl *ctrl,
                    struct velocitor_ctrl_transaction *transaction);
 
   // Completion structure.
@@ -62,32 +62,39 @@ void velocitor_ctrl_transaction_cancel(
     struct velocitor_ctrl_transaction *transaction) {
   struct velocitor_ctrl_transaction_private *private = to_private(transaction);
 
+  // Whoever takes the entry out of the table owns the reference the send put
+  // on it, and owes exactly one notify and one release. The drain loop of
+  // velocitor_ctrl_rpmsg_remove() is the other candidate, so what decides is
+  // not removing -- it is having been the one who removed.
   mutex_lock(&private->ctrl->lock);
-  idr_remove(&private->ctrl->inflight_reqs, private->seq);
+  void *claimed = idr_remove(&private->ctrl->inflight_reqs, private->seq);
   mutex_unlock(&private->ctrl->lock);
 
+  if (NULL == claimed)
+    return;
+
   transaction->status = -ECANCELED;
-  velocitor_ctrl_transaction_notify(private->ctrl->rpdev, transaction);
+  velocitor_ctrl_transaction_notify(private->ctrl, transaction);
   velocitor_ctrl_transaction_release(transaction);
 }
 
 // Notify a transaction to the caller
 void velocitor_ctrl_transaction_notify(
-    struct rpmsg_device *rpdev,
+    struct velocitor_ctrl *ctrl,
     struct velocitor_ctrl_transaction *transaction) {
   struct velocitor_ctrl_transaction_private *private = to_private(transaction);
 
   if (NULL != private->callback)
-    private->callback(rpdev, transaction);
+    private->callback(ctrl, transaction);
   if (NULL != private->async)
     complete(private->async);
 }
 
 int velocitor_ctrl_transaction_alloc(
-    struct rpmsg_device *rpdev, struct velocitor_ctrl_transaction **transaction,
-    void (*callback)(struct rpmsg_device *rpdev,
+    struct velocitor_ctrl *ctrl,
+    struct velocitor_ctrl_transaction **transaction,
+    void (*callback)(struct velocitor_ctrl *ctrl,
                      struct velocitor_ctrl_transaction *result)) {
-  struct velocitor_ctrl *ctrl = dev_get_drvdata(&rpdev->dev);
   struct velocitor_ctrl_transaction_private *private = NULL;
   int seq = 0;
 
@@ -123,13 +130,13 @@ int velocitor_ctrl_transaction_alloc(
 }
 
 int velocitor_ctrl_transaction_send(
-    struct rpmsg_device *rpdev,
+    struct velocitor_ctrl *ctrl,
     struct velocitor_ctrl_transaction *transaction) {
   struct velocitor_ctrl_transaction_private *private = NULL;
   size_t payload_len = 0;
   int err = 0;
 
-  if (NULL == transaction)
+  if ((NULL == transaction) || (NULL == ctrl))
     return -EINVAL;
 
   switch (le16_to_cpu(transaction->request.msg.op)) {
@@ -152,8 +159,21 @@ int velocitor_ctrl_transaction_send(
   private = to_private(transaction);
   kref_get(&private->refcount);
 
-  if ((err = rpmsg_send(rpdev->ept, &transaction->request,
-                        sizeof(struct velocitor_ctrl_msg) + payload_len)))
+  // The channel is needed here and nowhere else, for as long as the send
+  // takes and no longer -- the wait below does not touch it. Read side:
+  // virtio_rpmsg_bus serialises the transmission itself, so this excludes the
+  // teardown, not the other senders.
+  down_read(&ctrl->rpdev_lock);
+  if (NULL == ctrl->rpdev)
+    err = -ENODEV;
+  else
+    err = rpmsg_send(ctrl->rpdev->ept, &transaction->request,
+                     sizeof(struct velocitor_ctrl_msg) + payload_len);
+  up_read(&ctrl->rpdev_lock);
+
+  // Outside the read side on purpose: cancel() takes ctrl->lock, and nesting
+  // the two would invent a lock order nothing else needs.
+  if (err)
     velocitor_ctrl_transaction_cancel(transaction);
 
   return err;

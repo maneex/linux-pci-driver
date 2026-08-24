@@ -43,13 +43,19 @@ void velocitor_ctrl_transaction_cancel(
  * \return 0 on success, an error number otherwise.
  */
 int velocitor_ctrl_transaction_alloc(
-    struct rpmsg_device *rpdev, struct velocitor_ctrl_transaction **transaction,
-    void (*callback)(struct rpmsg_device *rpdev,
+    struct velocitor_ctrl *ctrl,
+    struct velocitor_ctrl_transaction **transaction,
+    void (*callback)(struct velocitor_ctrl *ctrl,
                      struct velocitor_ctrl_transaction *result));
 
 /// Send a request to the device.
+/**
+ * Takes the channel under rpdev_lock for the duration of the send only, and
+ * answers -ENODEV if it went away. The caller never holds a rpmsg_device.
+ */
 int velocitor_ctrl_transaction_send(
-    struct rpmsg_device *rpdev, struct velocitor_ctrl_transaction *transaction);
+    struct velocitor_ctrl *ctrl,
+    struct velocitor_ctrl_transaction *transaction);
 
 /// Wait for a transaction to complete.
 int velocitor_ctrl_transaction_wait(
@@ -57,6 +63,7 @@ int velocitor_ctrl_transaction_wait(
 
 /// Notify the caller that a request has been properly handled.
 void velocitor_ctrl_transaction_notify(
-    struct rpmsg_device *rpdev, struct velocitor_ctrl_transaction *transaction);
+    struct velocitor_ctrl *ctrl,
+    struct velocitor_ctrl_transaction *transaction);
 
 #endif // not VELOCITOR_CTRL_TRANSACTION_H

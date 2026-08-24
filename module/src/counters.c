@@ -7,9 +7,10 @@
 
 static int velocitor_counters_debugfs_show(struct seq_file *s, void *unused) {
   struct pci_dev *dev = s->private;
+  struct velocitor_dev *device = pci_get_drvdata(dev);
   struct counters counters = {};
 
-  velocitor_counters_read(dev, &counters);
+  velocitor_counters_read(device, &counters);
   seq_printf(s, "db_rx                %u\n", counters.db_rx);
   seq_printf(s, "notify_tx            %u\n", counters.notify_tx);
   seq_printf(s, "notify_coalesced     %u\n", counters.notify_coalesced);
@@ -47,18 +48,15 @@ static int velocitor_counters_debugfs_reset(void *dev, u64 val) {
 DEFINE_DEBUGFS_ATTRIBUTE(velocitor_counters_debugfs_reset_fops, NULL,
                          velocitor_counters_debugfs_reset, "%llu\n");
 
-void velocitor_counters_reset(struct pci_dev *dev) {
-  struct velocitor_dev *device = pci_get_drvdata(dev);
-
+void velocitor_counters_reset(struct velocitor_dev *device) {
   // Thou shalt not reset while I'm reading.
   mutex_lock(&device->counters.lock);
   writel(1, device->bar0 + VEL_REG_CNT_RESET);
   mutex_unlock(&device->counters.lock);
 }
 
-void velocitor_counters_read(struct pci_dev *dev, struct counters *counters) {
-  struct velocitor_dev *device = pci_get_drvdata(dev);
-
+void velocitor_counters_read(struct velocitor_dev *device,
+                             struct counters *counters) {
   mutex_lock(&device->counters.lock);
 
   // Snapshot counters..

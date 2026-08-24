@@ -28,6 +28,7 @@ static const struct pci_device_id pci_id_table[] = {
 MODULE_DEVICE_TABLE(pci, pci_id_table);
 
 static struct dentry *velocitor_debugfs_root = NULL;
+static struct class *class = NULL;
 
 // https : // www.kernel.org/doc/html/v6.0/PCI/pci.html
 
@@ -83,6 +84,7 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   dev_info(&dev->dev, "probe: device found");
 
   velocitor_debugfs_initialize(dev, velocitor_debugfs_root);
+  device->cdev.class = class;
 
   //  Enable the device
   if ((err = pcim_enable_device(dev)))
@@ -135,6 +137,10 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   if ((err = velocitor_remoteproc_initialize(dev)))
     return err;
 
+  // Initialize char device.
+  if ((err = velocitor_cdev_initialize(dev)))
+    return err;
+
   dev_info(&dev->dev, "probe: initialisation complete");
 
   return 0;
@@ -164,8 +170,14 @@ static int __init init_(void) {
   pr_info("velocitor: loading driver\n");
   velocitor_debugfs_root = debugfs_create_dir(KBUILD_MODNAME, NULL);
 
-  if ((err = velocitor_ctrl_rpmsg_initialize()))
+  class = class_create(KBUILD_MODNAME);
+  if (IS_ERR(class)) {
+    err = PTR_ERR(class);
     goto error_debugfs;
+  }
+
+  if ((err = velocitor_ctrl_rpmsg_initialize()))
+    goto error_class;
 
   if ((err = pci_register_driver(&velocitor_pci_driver)))
     goto error_rpmsg;
@@ -174,6 +186,10 @@ static int __init init_(void) {
 
 error_rpmsg:
   velocitor_ctrl_rpmsg_release();
+
+error_class:
+  class_destroy(class);
+
 error_debugfs:
   debugfs_remove_recursive(velocitor_debugfs_root);
   return err;
@@ -191,6 +207,7 @@ static void __exit exit_(void) {
   pr_info("velocitor: unloading driver\n");
   pci_unregister_driver(&velocitor_pci_driver);
   velocitor_ctrl_rpmsg_release();
+  class_destroy(class);
   debugfs_remove_recursive(velocitor_debugfs_root);
 }
 

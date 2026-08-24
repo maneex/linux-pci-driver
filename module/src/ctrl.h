@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 #include <linux/pci.h>
 #include <linux/rpmsg.h>
+#include <linux/rwsem.h>
 #include <linux/stddef.h>
 #include <linux/types.h>
 
@@ -84,7 +85,10 @@ struct velocitor_ctrl_transaction;
 
 struct velocitor_ctrl {
   // The channel, while there is one. NULL between two generations.
+  struct rw_semaphore rpdev_lock;
   struct rpmsg_device *rpdev;
+
+  struct device *dev;
 
   struct mutex lock;
   struct idr inflight_reqs;

@@ -10,6 +10,9 @@
 // Driver headers.
 #include "ctrl.h"
 
+// Forward decls.
+struct velocitor_dev;
+
 /// One live device allocation, host side.
 struct velocitor_handle {
   // Device handle
@@ -46,13 +49,12 @@ void velocitor_handles_release(struct velocitor_handle *entry);
 void velocitor_handles_regenerate(struct pci_dev *dev);
 
 // Insert a handle into the table.
-int velocitor_handles_insert(struct pci_dev *dev, u64 size,
-                             const struct velocitor_ctrl_alloc_resp *resp,
-                             struct velocitor_handle **dstentry);
+int velocitor_handles_insert(struct velocitor_dev *device, u64 size,
+                             const struct velocitor_ctrl_alloc_resp *resp);
 
 // Erase a handle from the table.
-int velocitor_handles_erase(struct pci_dev *dev,
-                            struct velocitor_handle *handle);
+int velocitor_handles_erase(struct velocitor_dev *device, u32 generation,
+                            u32 handle);
 
 // Module initialization
 int velocitor_handles_initialize(struct pci_dev *dev);

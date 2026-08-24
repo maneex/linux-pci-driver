@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 
 // Driver headers.
+#include "cdev.h"
 #include "ctrl.h"
 #include "device-trace.h"
 #include "dma.h"
@@ -56,6 +57,8 @@ struct velocitor_dev {
     u32 generation;
     struct velocitor_dma_buf rsc;
   } rproc;
+
+  struct velocitor_cdev cdev;
 };
 
 #endif // not VELOCITOR_DEVICE_H

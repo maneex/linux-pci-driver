@@ -35,17 +35,15 @@ static struct velocitor_dev *velocitor_ctrl_device(struct rpmsg_device *rpdev) {
 }
 
 static void
-velocitor_ctrl_oninfo(struct rpmsg_device *rpdev,
+velocitor_ctrl_oninfo(struct velocitor_ctrl *ctrl,
                       struct velocitor_ctrl_transaction *transaction) {
-  struct velocitor_ctrl *ctrl = dev_get_drvdata(&rpdev->dev);
-
   if (transaction->status) {
-    dev_err(&rpdev->dev, "rpmsg: INFO answered %d", transaction->status);
+    dev_err(ctrl->dev, "rpmsg: INFO answered %d", transaction->status);
     return;
   }
   ctrl->info = transaction->answer.info;
   ctrl->info_valid = true;
-  dev_info(&rpdev->dev,
+  dev_info(ctrl->dev,
            "rpmsg: firmware abi %u, caps 0x%08x, ctrl_caps 0x%08x, %u node(s), "
            "%u engine(s), align %u, generation %u",
            le32_to_cpu(ctrl->info.abi), le32_to_cpu(ctrl->info.caps),
@@ -71,16 +69,20 @@ static int velocitor_ctrl_rpmsg_probe(struct rpmsg_device *rpdev) {
   // to the channel is set up here. drvdata stays the shortcut every reply
   // takes, so it caches what the walk above found.
   ctrl = &device->ctrl;
+
+  down_write(&ctrl->rpdev_lock);
   ctrl->rpdev = rpdev;
+  up_write(&ctrl->rpdev_lock);
+
   dev_set_drvdata(&rpdev->dev, ctrl);
 
-  if ((err = velocitor_ctrl_transaction_alloc(rpdev, &transaction,
+  if ((err = velocitor_ctrl_transaction_alloc(ctrl, &transaction,
                                               velocitor_ctrl_oninfo)))
     goto error;
 
   transaction->request.msg.op = cpu_to_le16(VEL_OP_INFO);
 
-  err = velocitor_ctrl_transaction_send(rpdev, transaction);
+  err = velocitor_ctrl_transaction_send(ctrl, transaction);
   velocitor_ctrl_transaction_release(transaction);
   if (err) {
     dev_err(&rpdev->dev, "rpmsg: INFO failed: %d", err);
@@ -90,7 +92,10 @@ static int velocitor_ctrl_rpmsg_probe(struct rpmsg_device *rpdev) {
   return 0;
 
 error:
+  down_write(&ctrl->rpdev_lock);
   ctrl->rpdev = NULL;
+  up_write(&ctrl->rpdev_lock);
+
   dev_set_drvdata(&rpdev->dev, NULL);
   return err;
 }
@@ -100,10 +105,13 @@ static void velocitor_ctrl_rpmsg_remove(struct rpmsg_device *rpdev) {
 
   dev_info(&rpdev->dev, "rpmsg: destroying channel");
 
-  // Destroy the entry point, to get sure that we don't get more replies while
-  // destroying.
+  down_write(&ctrl->rpdev_lock);
   rpmsg_destroy_ept(rpdev->ept);
   rpdev->ept = NULL;
+  ctrl->rpdev = NULL;
+  up_write(&ctrl->rpdev_lock);
+
+  dev_set_drvdata(&rpdev->dev, NULL);
 
   // Mark in flight transactions staled, notify callers.
   while (true) {
@@ -121,13 +129,9 @@ static void velocitor_ctrl_rpmsg_remove(struct rpmsg_device *rpdev) {
     mutex_unlock(&ctrl->lock);
 
     transaction->status = -ESTALE;
-    velocitor_ctrl_transaction_notify(rpdev, transaction);
+    velocitor_ctrl_transaction_notify(ctrl, transaction);
     velocitor_ctrl_transaction_release(transaction);
   }
-
-  // The table stays, the binding goes: the card keeps both across generations.
-  ctrl->rpdev = NULL;
-  dev_set_drvdata(&rpdev->dev, NULL);
 }
 
 static int velocitor_ctrl_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
@@ -206,7 +210,7 @@ static int velocitor_ctrl_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
 
 out:
   // Notify completion, callback if needed.
-  velocitor_ctrl_transaction_notify(rpdev, transaction);
+  velocitor_ctrl_transaction_notify(ctrl, transaction);
   velocitor_ctrl_transaction_release(transaction);
   return 0;
 }
@@ -215,8 +219,12 @@ int velocitor_ctrl_initialize(struct pci_dev *dev) {
   struct velocitor_dev *device = pci_get_drvdata(dev);
   int err = 0;
 
+  device->ctrl.dev = &dev->dev;
+
   if ((err = devm_mutex_init(&dev->dev, &device->ctrl.lock)))
     return err;
+
+  init_rwsem(&device->ctrl.rpdev_lock);
 
   idr_init(&device->ctrl.inflight_reqs);
   return devm_add_action_or_reset(&dev->dev, velocitor_ctrl_destroy,
