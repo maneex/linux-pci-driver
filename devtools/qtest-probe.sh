@@ -437,16 +437,219 @@ CHECKS=(
     "CNT_DB_RX = 4             |readl $((BAR0 + 0x98))|0x0000000000000004"
     "CNT_DESC still 1          |readl $((BAR0 + 0xa8))|0x0000000000000001"
 
+    # ---- Control plane: ALLOC, FREE, STAT (spec 7.2, annex D.5) ---------
+    #
+    # Queue 1 is the other half of vdev0: what the host sends to the device.
+    # Everything below is one exchange -- a request published on queue 1, a
+    # doorbell, and a reply written into a buffer lent on queue 0 -- so the
+    # test exercises the transport and the operation at the same time. That
+    # is deliberate: a reply that never leaves is indistinguishable from an
+    # operation that answered wrongly if only the operation is checked.
+    #
+    # GENERATION is 2 here (the boot above is the second that succeeded), and
+    # the allocator restarted with it, so the first handle of the session is
+    # 1 at the base of node 0 -- VEL_NODE0_BASE, which is 16 MiB because the
+    # fixed aperture comes off that node (spec 3.2).
+
+    # Seven more receive buffers on queue 0, one per reply below.
+    "rx desc[1] -> 0x1231000   |write 0x1210010 8 0x0010230100000000|"
+    "rx desc[1].len = 512      |write 0x1210018 4 0x00020000|"
+    "rx desc[1].flags = WRITE  |write 0x121001c 2 0x0200|"
+    "rx desc[2] -> 0x1232000   |write 0x1210020 8 0x0020230100000000|"
+    "rx desc[2].len = 512      |write 0x1210028 4 0x00020000|"
+    "rx desc[2].flags = WRITE  |write 0x121002c 2 0x0200|"
+    "rx desc[3] -> 0x1233000   |write 0x1210030 8 0x0030230100000000|"
+    "rx desc[3].len = 512      |write 0x1210038 4 0x00020000|"
+    "rx desc[3].flags = WRITE  |write 0x121003c 2 0x0200|"
+    "rx desc[4] -> 0x1234000   |write 0x1210040 8 0x0040230100000000|"
+    "rx desc[4].len = 512      |write 0x1210048 4 0x00020000|"
+    "rx desc[4].flags = WRITE  |write 0x121004c 2 0x0200|"
+    "rx desc[5] -> 0x1235000   |write 0x1210050 8 0x0050230100000000|"
+    "rx desc[5].len = 512      |write 0x1210058 4 0x00020000|"
+    "rx desc[5].flags = WRITE  |write 0x121005c 2 0x0200|"
+    "rx desc[6] -> 0x1236000   |write 0x1210060 8 0x0060230100000000|"
+    "rx desc[6].len = 512      |write 0x1210068 4 0x00020000|"
+    "rx desc[6].flags = WRITE  |write 0x121006c 2 0x0200|"
+    "rx desc[7] -> 0x1237000   |write 0x1210070 8 0x0070230100000000|"
+    "rx desc[7].len = 512      |write 0x1210078 4 0x00020000|"
+    "rx desc[7].flags = WRITE  |write 0x121007c 2 0x0200|"
+    "rx avail.ring[1..7]       |write 0x1200006 14 0x0100020003000400050006000700|"
+    "rx avail.idx = 8          |write 0x1200002 2 0x0800|"
+
+    # Queue 1, described then enabled, exactly like queue 0 above.
+    "VQ_SELECT = 1             |writel $((BAR0 + 0x100)) 0x00000001|"
+    "VQ_DESC_LO = 0x1250000    |writel $((BAR0 + 0x110)) 0x01250000|"
+    "VQ_AVAIL_LO = 0x1240000   |writel $((BAR0 + 0x118)) 0x01240000|"
+    "VQ_USED_LO = 0x1260000    |writel $((BAR0 + 0x120)) 0x01260000|"
+    "VQ_NUM = 256              |writel $((BAR0 + 0x108)) 0x00000100|"
+    "VQ_MSIX_VECTOR = 2        |writel $((BAR0 + 0x128)) 0x00000002|"
+    "VQ_ENABLE = 1             |writel $((BAR0 + 0x10c)) 0x00000001|"
+    "queue 1 is enabled        |readl $((BAR0 + 0x10c))|0x0000000000000001"
+
+    # The seven requests, laid out once.  Each is an rpmsg header addressed
+    # to VEL_RPMSG_CTRL_ADDR, then a vel_msg, then the operation's payload.
+    "tx desc[0] -> 0x1270000   |write 0x1250000 8 0x0000270100000000|"
+    "tx desc[0].len = 48       |write 0x1250008 4 0x30000000|"
+    "tx desc[1] -> 0x1271000   |write 0x1250010 8 0x0010270100000000|"
+    "tx desc[1].len = 32       |write 0x1250018 4 0x20000000|"
+    "tx desc[2] -> 0x1272000   |write 0x1250020 8 0x0020270100000000|"
+    "tx desc[2].len = 40       |write 0x1250028 4 0x28000000|"
+    "tx desc[3] -> 0x1273000   |write 0x1250030 8 0x0030270100000000|"
+    "tx desc[3].len = 40       |write 0x1250038 4 0x28000000|"
+    "tx desc[4] -> 0x1274000   |write 0x1250040 8 0x0040270100000000|"
+    "tx desc[4].len = 48       |write 0x1250048 4 0x30000000|"
+    "tx desc[5] -> 0x1275000   |write 0x1250050 8 0x0050270100000000|"
+    "tx desc[5].len = 48       |write 0x1250058 4 0x30000000|"
+    "tx desc[6] -> 0x1276000   |write 0x1250060 8 0x0060270100000000|"
+    "tx desc[6].len = 48       |write 0x1250068 4 0x30000000|"
+    "tx avail.ring[0..6]       |write 0x1240004 14 0x0000010002000300040005000600|"
+
+    # ALLOC of 4096 bytes on node 0, seq 1.
+    "req0 hdr.src = 1024       |write 0x1270000 4 0x00040000|"
+    "req0 hdr.dst = ctrl addr  |write 0x1270004 4 0x00040000|"
+    "req0 hdr.len = 32         |write 0x127000c 2 0x2000|"
+    "req0 msg.seq = 1          |write 0x1270010 4 0x01000000|"
+    "req0 msg.op = ALLOC       |write 0x1270014 2 0x0200|"
+    "req0 req.size = 4096      |write 0x1270020 8 0x0010000000000000|"
+    "req0 req.node = 0         |write 0x127002c 4 0x00000000|"
+    "publish it                |write 0x1240002 2 0x0100|"
+    "ring the doorbell, id 1   |writel $((BAR0 + 0x34)) 0x00000001|"
+    "let virtual time pass     |clock_step 2000|"
+
+    # The reply, byte for byte.  dev_offset is what makes this test worth
+    # writing: 16 MiB says the aperture was taken off node 0 (spec 3.2), and
+    # nothing else in the exchange would have caught the other convention.
+    "rsp0 hdr.src = ctrl addr  |read 0x1231000 4|0x00040000"
+    "rsp0 hdr.dst = 1024       |read 0x1231004 4|0x00040000"
+    "rsp0 hdr.len = 40         |read 0x123100c 2|0x2800"
+    "rsp0 msg.seq = 1          |read 0x1231010 4|0x01000000"
+    "rsp0 msg.op = ALLOC       |read 0x1231014 2|0x0200"
+    "rsp0 msg.status = 0       |read 0x1231018 4|0x00000000"
+    "rsp0 handle = 1, never 0  |read 0x1231020 4|0x01000000"
+    "rsp0 node = 0             |read 0x1231024 4|0x00000000"
+    "rsp0 generation = 2       |read 0x1231028 4|0x02000000"
+    "rsp0 dev_offset = 16 MiB  |read 0x1231030 8|0x0000000100000000"
+
+    # STAT, seq 2.  Node 0 is 112 MiB allocatable and node 1 is 128: the
+    # asymmetry section 3.2 exposes rather than corrects, and the reason
+    # section 7.2 reports capacity and free per node instead of a total.
+    "req1 hdr.src = 1024       |write 0x1271000 4 0x00040000|"
+    "req1 hdr.dst = ctrl addr  |write 0x1271004 4 0x00040000|"
+    "req1 hdr.len = 16         |write 0x127100c 2 0x1000|"
+    "req1 msg.seq = 2          |write 0x1271010 4 0x02000000|"
+    "req1 msg.op = STAT        |write 0x1271014 2 0x0400|"
+    "publish it                |write 0x1240002 2 0x0200|"
+    "ring the doorbell, id 1   |writel $((BAR0 + 0x34)) 0x00000001|"
+    "let virtual time pass     |clock_step 2000|"
+    "rsp1 hdr.len = 56         |read 0x123200c 2|0x3800"
+    "rsp1 node0 cap = 112 MiB  |read 0x1232020 8|0x0000000700000000"
+    "rsp1 node0 free = cap-4K  |read 0x1232028 8|0x00f0ff0600000000"
+    "rsp1 node1 cap = 128 MiB  |read 0x1232030 8|0x0000000800000000"
+    "rsp1 node1 free = whole   |read 0x1232038 8|0x0000000800000000"
+    "rsp1 live_handles = 1     |read 0x1232040 4|0x01000000"
+
+    # FREE of handle 1, seq 3.  No payload comes back: status alone.
+    "req2 hdr.src = 1024       |write 0x1272000 4 0x00040000|"
+    "req2 hdr.dst = ctrl addr  |write 0x1272004 4 0x00040000|"
+    "req2 hdr.len = 24         |write 0x127200c 2 0x1800|"
+    "req2 msg.seq = 3          |write 0x1272010 4 0x03000000|"
+    "req2 msg.op = FREE        |write 0x1272014 2 0x0300|"
+    "req2 free.handle = 1      |write 0x1272020 4 0x01000000|"
+    "publish it                |write 0x1240002 2 0x0300|"
+    "ring the doorbell, id 1   |writel $((BAR0 + 0x34)) 0x00000001|"
+    "let virtual time pass     |clock_step 2000|"
+    "rsp2 hdr.len = 16 only    |read 0x123300c 2|0x1000"
+    "rsp2 msg.status = 0       |read 0x1233018 4|0x00000000"
+
+    # The same FREE again.  Section 7.2 says a handle is never reused within
+    # a session, so the second one has to be refused -- without that,
+    # ERR_CODE = 3 would never fire and a use-after-free would read someone
+    # else's block in silence.
+    "req3 hdr.src = 1024       |write 0x1273000 4 0x00040000|"
+    "req3 hdr.dst = ctrl addr  |write 0x1273004 4 0x00040000|"
+    "req3 hdr.len = 24         |write 0x127300c 2 0x1800|"
+    "req3 msg.seq = 4          |write 0x1273010 4 0x04000000|"
+    "req3 msg.op = FREE        |write 0x1273014 2 0x0300|"
+    "req3 free.handle = 1      |write 0x1273020 4 0x01000000|"
+    "publish it                |write 0x1240002 2 0x0400|"
+    "ring the doorbell, id 1   |writel $((BAR0 + 0x34)) 0x00000001|"
+    "let virtual time pass     |clock_step 2000|"
+    "rsp3 status = -EINVAL     |read 0x1234018 4|0xeaffffff"
+    "ERR_CODE = 3 (bad handle) |readl $((BAR0 + 0x50))|0x0000000000000003"
+    "ERR_HANDLE names it       |readl $((BAR0 + 0x60))|0x0000000000000001"
+
+    # ALLOC on a node that does not exist.  Refused without qualifying the
+    # error block: section 4.4 has no code for a malformed argument, and
+    # inventing one would be changing the contract rather than the model.
+    "req4 hdr.src = 1024       |write 0x1274000 4 0x00040000|"
+    "req4 hdr.dst = ctrl addr  |write 0x1274004 4 0x00040000|"
+    "req4 hdr.len = 32         |write 0x127400c 2 0x2000|"
+    "req4 msg.seq = 5          |write 0x1274010 4 0x05000000|"
+    "req4 msg.op = ALLOC       |write 0x1274014 2 0x0200|"
+    "req4 req.size = 4096      |write 0x1274020 8 0x0010000000000000|"
+    "req4 req.node = 99        |write 0x127402c 4 0x63000000|"
+    "publish it                |write 0x1240002 2 0x0500|"
+    "ring the doorbell, id 1   |writel $((BAR0 + 0x34)) 0x00000001|"
+    "let virtual time pass     |clock_step 2000|"
+    "rsp4 status = -EINVAL     |read 0x1235018 4|0xeaffffff"
+    "ERR_CODE still 3, not 7   |readl $((BAR0 + 0x50))|0x0000000000000003"
+
+    # Bit 5 of ERR_INJECT, section 9: the next ALLOC fails whatever the free
+    # memory is, and the bit is consumed when it acts.  Two allocations in a
+    # row prove both halves -- the first refused, the second served, which is
+    # what "consumed" means and what makes the injection reproducible.
+    "ack the handle error      |writel $((BAR0 + 0x30)) 0x00000020|"
+    "arm ERR_INJECT bit 5      |writel $((BAR0 + 0x40)) 0x00000020|"
+    "req5 hdr.src = 1024       |write 0x1275000 4 0x00040000|"
+    "req5 hdr.dst = ctrl addr  |write 0x1275004 4 0x00040000|"
+    "req5 hdr.len = 32         |write 0x127500c 2 0x2000|"
+    "req5 msg.seq = 6          |write 0x1275010 4 0x06000000|"
+    "req5 msg.op = ALLOC       |write 0x1275014 2 0x0200|"
+    "req5 req.size = 4096      |write 0x1275020 8 0x0010000000000000|"
+    "req5 req.node = ANY       |write 0x127502c 4 0xffffffff|"
+    "publish it                |write 0x1240002 2 0x0600|"
+    "ring the doorbell, id 1   |writel $((BAR0 + 0x34)) 0x00000001|"
+    "let virtual time pass     |clock_step 2000|"
+    "rsp5 status = -ENOMEM     |read 0x1236018 4|0xf4ffffff"
+    "ERR_CODE = 7 (nomem)      |readl $((BAR0 + 0x50))|0x0000000000000007"
+    "bit 5 disarmed itself     |readl $((BAR0 + 0x40))|0x0000000000000000"
+
+    # And the one after it goes through, on node 0 -- VEL_NODE_ANY takes the
+    # first node that can hold the block, never the emptiest: section 12 asks
+    # for the imbalance to be measured, so the model must not even it out.
+    "ack the nomem error       |writel $((BAR0 + 0x30)) 0x00000020|"
+    "req6 hdr.src = 1024       |write 0x1276000 4 0x00040000|"
+    "req6 hdr.dst = ctrl addr  |write 0x1276004 4 0x00040000|"
+    "req6 hdr.len = 32         |write 0x127600c 2 0x2000|"
+    "req6 msg.seq = 7          |write 0x1276010 4 0x07000000|"
+    "req6 msg.op = ALLOC       |write 0x1276014 2 0x0200|"
+    "req6 req.size = 4096      |write 0x1276020 8 0x0010000000000000|"
+    "req6 req.node = ANY       |write 0x127602c 4 0xffffffff|"
+    "publish it                |write 0x1240002 2 0x0700|"
+    "ring the doorbell, id 1   |writel $((BAR0 + 0x34)) 0x00000001|"
+    "let virtual time pass     |clock_step 2000|"
+    "rsp6 msg.status = 0       |read 0x1237018 4|0x00000000"
+    "rsp6 handle = 2, not 1    |read 0x1237020 4|0x02000000"
+    "rsp6 node = 0 (ANY)       |read 0x1237024 4|0x00000000"
+    "rsp6 offset = 16 MiB + 4K |read 0x1237030 8|0x0010000100000000"
+
+    # Back to queue 0, which is what the checks below assume is selected.
+    "VQ_SELECT = 0             |writel $((BAR0 + 0x100)) 0x00000000|"
+
     # Annex D.3: RESET purges the window and invalidates the table.  This is
     # what makes the driver reprogram both on every start -- and what makes a
     # recovery that forgets to do so fail loudly instead of going quiet.
+    #
+    # CNT_DESC is 15 by now: the announcement's buffer, then seven requests
+    # and their seven replies.  What the last check asserts is that the
+    # doorbell after the reset adds none of its own.
     "assert RESET              |writel $((BAR0 + 0x1c)) 0x00000001|"
     "queue 0 is disabled       |readl $((BAR0 + 0x10c))|0x0000000000000000"
     "RSC_VALID cleared with it |readl $((BAR0 + 0xfc))|0x0000000000000000"
     "the ring addresses stay   |readl $((BAR0 + 0x118))|0x0000000001200000"
     "doorbell after reset      |writel $((BAR0 + 0x34)) 0x00000000|"
     "snapshot                  |writel $((BAR0 + 0x94)) 0x00000001|"
-    "counted but not swept     |readl $((BAR0 + 0xa8))|0x0000000000000001"
+    "counted but not swept     |readl $((BAR0 + 0xa8))|0x000000000000000f"
 )
 
 commands=("${SETUP[@]}")
