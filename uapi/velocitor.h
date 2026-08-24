@@ -8,6 +8,12 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
+// Maximum number of velocitor devices in a machine.
+#define VEL_MAX_DEVICES 8
+
+// Number of API nodes.
+#define VEL_UAPI_NODES 2
+
 struct counters {
   __u32 db_rx;
   __u32 notify_tx;
@@ -55,13 +61,14 @@ struct velocitor_ioctl_alloc {
 };
 
 struct velocitor_ioctl_stat_node {
-  u64 capacity;
-  u64 free;
+  __u64 capacity;
+  __u64 free;
 };
 
 struct velocitor_ioctl_stats {
-  u32 live_handles;
-  struct velocitor_ioctl_stat_node nodes[VEL_NODES];
+  __u32 live_handles;
+  __u32 reserved;
+  struct velocitor_ioctl_stat_node nodes[VEL_UAPI_NODES];
 };
 
 #define VEL_DRV_MAGIC 'v'
@@ -69,9 +76,9 @@ struct velocitor_ioctl_stats {
 #define VEL_IOC_INFO                                                           \
   _IOR(VEL_DRV_MAGIC, VEL_DRV_IOCTL_BASE + 0, struct velocitor_ioctl_info)
 #define VEL_IOC_STATS                                                          \
-  _IOR(VEL_DRV_MAGIC, VEL_DRV_IOCTL_BASE + 1, struct counters)
+  _IOR(VEL_DRV_MAGIC, VEL_DRV_IOCTL_BASE + 1, struct velocitor_ioctl_stats)
 #define VEL_IOC_ALLOC_DEV                                                      \
-  _IOWR(VEL_DRV_MAGIC, VEL_DRV_IOCTL_BASE + 2, unsigned long)
+  _IOWR(VEL_DRV_MAGIC, VEL_DRV_IOCTL_BASE + 2, struct velocitor_ioctl_alloc)
 #define VEL_IOC_FREE_DEV                                                       \
-  _IOW(VEL_DRV_MAGIC, VEL_DRV_IOCTL_BASE + 3, unsigned long)
+  _IOW(VEL_DRV_MAGIC, VEL_DRV_IOCTL_BASE + 3, struct velocitor_ioctl_handle)
 #endif // not VELOCITOR_H
