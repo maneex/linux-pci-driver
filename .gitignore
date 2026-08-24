@@ -23,3 +23,16 @@ module/Module.symvers
 # Generated firmware image and its generator
 firmware/velocitor-fw.elf
 firmware/mkfw
+
+# runtime/ is a deliverable (spec 10.3), not a build directory. Said out loud
+# because a global ignore file may well carry a bare "runtime" pattern, and a
+# parent directory that is excluded takes everything under it with it -- the
+# library would simply never be committed, without a word.
+!runtime/
+
+# Runtime build artefacts
+runtime/src/*.o
+runtime/src/*.lo
+runtime/*.a
+runtime/*.so
+runtime/scan-test
