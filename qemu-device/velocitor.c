@@ -103,6 +103,35 @@ typedef struct VelocitorQueue {
     uint32_t last_avail;
 } VelocitorQueue;
 
+/*
+ * One live block of device-local memory, spec sections 3.2 and 7.2.
+ *
+ * The table is indexed by handle - 1, which is what makes handles start at 1
+ * without a separate rule: section 7.2 needs zero to stay the "not resident"
+ * sentinel of section 8.3, and an index that is also the identifier cannot
+ * accidentally hand it out.
+ *
+ * `live` goes to false on FREE while the block itself is never given back --
+ * section 7.2 says FREE always invalidates the handle even when the allocator
+ * reclaims nothing, because otherwise ERR_CODE = 3 would be undetectable.
+ */
+typedef struct VelocitorAlloc {
+    uint64_t offset;        /* device address of the block                */
+    uint64_t size;          /* rounded up to VEL_ALLOC_ALIGN              */
+    uint32_t node;          /* 0 or 1 -- never VEL_NODE_ANY               */
+    uint32_t live;
+} VelocitorAlloc;
+
+/*
+ * How many allocations one firmware session may hold.  Not in the shared
+ * header: section 7.2 states no such limit, so this is the model's own
+ * ceiling and not part of the contract.  It exists so that the device model
+ * allocates nothing at run time -- which keeps it deterministic (annex D.6)
+ * and its migration stream a fixed-size array.  Far beyond anything the
+ * bump allocator of section 14 makes meaningful.
+ */
+#define VEL_MAX_HANDLES     1024u
+
 struct VelocitorState {
     /*< private >*/
     PCIDevice parent_obj;
@@ -233,6 +262,20 @@ struct VelocitorState {
     uint32_t err_handle;
     uint32_t err_generation;
     uint32_t err_dropped;
+
+    /*
+     * Device allocator, spec sections 3.2 and 7.2.  A bump pointer per node,
+     * as section 14 asks for: FREE invalidates the handle and gives nothing
+     * back, and a real allocator waits until there is a reason for one.
+     *
+     * All of it restarts at each entry into "running" -- section 6.5 says the
+     * allocator starts over at every boot, which is precisely what makes the
+     * {generation, handle} pair load-bearing rather than decorative.
+     */
+    uint64_t node_bump[VEL_NODES];
+    uint32_t next_handle;
+    uint32_t live_handles;
+    VelocitorAlloc alloc[VEL_MAX_HANDLES];
 
     /* Error injection, spec section 9 */
     uint32_t err_inject;    /* 0x040                                      */
@@ -548,6 +591,55 @@ static void velocitor_dma_start(VelocitorState *s, uint32_t ctl)
 }
 
 /* ------------------------------------------------------------------ */
+/* Device allocator -- spec sections 3.2, 7.2 and 14                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A bump pointer per node, which is what section 14 asks for to start with.
+ * FREE invalidates the handle and gives nothing back; a real allocator waits
+ * until there is a reason for one, and section 7.2 is written so that the
+ * difference is invisible to a correct driver.
+ *
+ * The node geometry lives here; the three operations that use it are down
+ * with the rest of the rpmsg wire format, because that is what they are.
+ */
+static uint64_t velocitor_node_base(unsigned node)
+{
+    return node == 0 ? VEL_NODE0_BASE : VEL_NODE1_BASE;
+}
+
+static uint64_t velocitor_node_end(unsigned node)
+{
+    return node == 0 ? VEL_NODE0_END : VEL_NODE1_END;
+}
+
+static uint64_t velocitor_node_free(VelocitorState *s, unsigned node)
+{
+    return velocitor_node_end(node) - s->node_bump[node];
+}
+
+/*
+ * Back to a fresh session, spec 6.5.
+ *
+ * Called on every entry into "running" and on device reset. The allocator
+ * restarts and so does the handle numbering, which is the whole reason a bare
+ * handle cannot be carried across a crash: handle 7 of generation 3 names
+ * someone else's block than handle 7 of generation 2, and nothing about the
+ * value says so.
+ */
+static void velocitor_alloc_reset(VelocitorState *s)
+{
+    unsigned n;
+
+    for (n = 0; n < VEL_NODES; n++) {
+        s->node_bump[n] = velocitor_node_base(n);
+    }
+    s->next_handle = 1;
+    s->live_handles = 0;
+    memset(s->alloc, 0, sizeof(s->alloc));
+}
+
+/* ------------------------------------------------------------------ */
 /* Firmware life cycle -- spec sections 4.1, 6.1, 6.5 and 6.6          */
 /* ------------------------------------------------------------------ */
 
@@ -679,6 +771,7 @@ static void velocitor_boot_done(void *opaque)
 
     s->fw_status = VEL_FW_STATUS_RUNNING;
     s->generation++;
+    velocitor_alloc_reset(s);
 
     /*
      * Publish an empty, well-formed trace ring (spec 6.6).  The loader has
@@ -1072,6 +1165,181 @@ struct VelocitorInfoResp {
     uint32_t generation;
 } QEMU_PACKED;
 
+struct VelocitorAllocReq {
+    uint64_t size;
+    uint32_t dtype;
+    uint32_t node;
+} QEMU_PACKED;
+
+struct VelocitorAllocResp {
+    uint32_t handle;
+    uint32_t node;
+    uint32_t generation;
+    uint32_t reserved;
+    uint64_t dev_offset;
+} QEMU_PACKED;
+
+/*
+ * FREE carries the handle it invalidates.  v0.6.3 named the operation without
+ * giving it a request; the field was added to the spec at step 7 rather than
+ * smuggled into `flags` or `reserved`, which section 7.2 says are written to
+ * zero and ignored (see annex B).
+ */
+struct VelocitorFreeReq {
+    uint32_t handle;
+    uint32_t reserved;
+} QEMU_PACKED;
+
+struct VelocitorStatNode {
+    uint64_t capacity;
+    uint64_t free;
+} QEMU_PACKED;
+
+struct VelocitorStatResp {
+    struct VelocitorStatNode node[VEL_NODES];
+    uint32_t live_handles;
+    uint32_t reserved;
+} QEMU_PACKED;
+
+/* Sizes the reply buffer, the way the driver's union does on its side. */
+union VelocitorCtrlResp {
+    struct VelocitorInfoResp info;
+    struct VelocitorAllocResp alloc;
+    struct VelocitorStatResp stat;
+};
+
+/*
+ * Which node serves a request.
+ *
+ * VEL_NODE_ANY takes node 0 unless it cannot hold the block, then node 1.
+ * Deterministic (annex D.6) and deliberately not balancing: section 3.2 makes
+ * the two nodes different sizes on purpose and section 12 asks for the
+ * imbalance to be measured. A policy that evened it out would hide the very
+ * thing the measurement is for.
+ */
+static bool velocitor_alloc_pick_node(VelocitorState *s, uint32_t want,
+                                      uint64_t size, unsigned *out)
+{
+    unsigned n;
+
+    if (want != VEL_NODE_ANY) {
+        *out = want;
+        return velocitor_node_free(s, want) >= size;
+    }
+
+    for (n = 0; n < VEL_NODES; n++) {
+        if (velocitor_node_free(s, n) >= size) {
+            *out = n;
+            return true;
+        }
+    }
+
+    *out = 0;
+    return false;
+}
+
+/*
+ * Serve one ALLOC, spec 7.2.  Returns the errno that goes into vel_msg.status.
+ *
+ * The response carries the generation the allocation was made under rather
+ * than leaving the driver to read GENERATION afterwards: section 6.5 calls
+ * that window an ABA moved one notch, and the bit 8 injection exists to open
+ * it on demand.
+ */
+static int velocitor_alloc_block(VelocitorState *s,
+                                 const struct VelocitorAllocReq *req,
+                                 struct VelocitorAllocResp *resp)
+{
+    uint64_t size = le64_to_cpu(req->size);
+    uint32_t want = le32_to_cpu(req->node);
+    unsigned node = 0;
+    uint32_t handle;
+
+    /*
+     * A malformed node has no ERR_CODE of its own in section 4.4, and
+     * inventing one would be changing the contract rather than the model. It
+     * is refused without qualifying the error block.
+     */
+    if (want != VEL_NODE_ANY && want >= VEL_NODES) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: ALLOC on node %u, only %u nodes and "
+                      "VEL_NODE_ANY (spec 7.2)\n", want, VEL_NODES);
+        return -EINVAL;
+    }
+
+    if (size == 0 || size > VEL_MEM_SIZE) {
+        return -EINVAL;
+    }
+    size = ROUND_UP(size, VEL_ALLOC_ALIGN);
+
+    if (s->next_handle > VEL_MAX_HANDLES ||
+        !velocitor_alloc_pick_node(s, want, size, &node)) {
+        velocitor_error_set(s, VEL_ERR_NOMEM, size);
+        return -ENOMEM;
+    }
+
+    handle = s->next_handle++;
+    s->alloc[handle - 1].offset = s->node_bump[node];
+    s->alloc[handle - 1].size = size;
+    s->alloc[handle - 1].node = node;
+    s->alloc[handle - 1].live = 1;
+    s->node_bump[node] += size;
+    s->live_handles++;
+
+    resp->handle = cpu_to_le32(handle);
+    resp->node = cpu_to_le32(node);
+    resp->generation = cpu_to_le32(s->generation);
+    resp->reserved = 0;
+    resp->dev_offset = cpu_to_le64(s->alloc[handle - 1].offset);
+    return 0;
+}
+
+/*
+ * Serve one FREE, spec 7.2.
+ *
+ * The handle is invalidated whether or not the memory comes back, so that
+ * using it again is detectable -- without that, ERR_CODE = 3 would never
+ * fire and a use-after-free would read someone else's block in silence.
+ * Handles are never reused within a session, so nothing can take its place.
+ */
+static int velocitor_free_block(VelocitorState *s,
+                                const struct VelocitorFreeReq *req)
+{
+    uint32_t handle = le32_to_cpu(req->handle);
+
+    if (handle == 0 || handle >= s->next_handle ||
+        !s->alloc[handle - 1].live) {
+        velocitor_error_qualify(s, VEL_ERR_BAD_HANDLE, 0,
+                                VEL_NOTIFYID_NONE, handle);
+        return -EINVAL;
+    }
+
+    s->alloc[handle - 1].live = 0;
+    s->live_handles--;
+    return 0;
+}
+
+/*
+ * Serve one STAT, spec 7.2.
+ *
+ * Capacity and free per node, because the two nodes do not have the same
+ * allocatable size (section 3.2) and a measurement protocol that reported a
+ * single total would be comparing two different things.
+ */
+static void velocitor_stat_fill(VelocitorState *s,
+                                struct VelocitorStatResp *resp)
+{
+    unsigned n;
+
+    for (n = 0; n < VEL_NODES; n++) {
+        resp->node[n].capacity =
+            cpu_to_le64(velocitor_node_end(n) - velocitor_node_base(n));
+        resp->node[n].free = cpu_to_le64(velocitor_node_free(s, n));
+    }
+    resp->live_handles = cpu_to_le32(s->live_handles);
+    resp->reserved = 0;
+}
+
 /*
  * Split ring layout, virtio 1.1 section 2.6.  Only the available ring is
  * spelled out here: the model reads the driver's index and the heads it
@@ -1391,7 +1659,7 @@ static void velocitor_rpmsg_recv(VelocitorState *s, uint32_t src,
 {
     const struct VelocitorCtrlMsg *req = data;
     uint8_t buffer[sizeof(struct VelocitorCtrlMsg) +
-                   sizeof(struct VelocitorInfoResp)];
+                   sizeof(union VelocitorCtrlResp)];
     struct VelocitorCtrlMsg *resp = (struct VelocitorCtrlMsg *)buffer;
     uint16_t op;
     uint16_t resp_len = sizeof(*resp);
@@ -1424,9 +1692,59 @@ static void velocitor_rpmsg_recv(VelocitorState *s, uint32_t src,
         break;
     }
 
+    case VEL_OP_ALLOC: {
+        const struct VelocitorAllocReq *areq = (const void *)(req + 1);
+        struct VelocitorAllocResp *aresp = (void *)(resp + 1);
+        int err;
+
+        if (len < sizeof(*req) + sizeof(*areq)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "velocitor: ALLOC of %u byte(s), shorter than its "
+                          "request (spec 7.2)\n", len);
+            resp->status = cpu_to_le32((uint32_t)-EINVAL);
+            break;
+        }
+
+        err = velocitor_alloc_block(s, areq, aresp);
+        if (err) {
+            resp->status = cpu_to_le32((uint32_t)err);
+        } else {
+            resp_len += sizeof(*aresp);
+        }
+        break;
+    }
+
+    case VEL_OP_FREE: {
+        const struct VelocitorFreeReq *freq = (const void *)(req + 1);
+        int err;
+
+        if (len < sizeof(*req) + sizeof(*freq)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "velocitor: FREE of %u byte(s), shorter than its "
+                          "request (spec 7.2)\n", len);
+            resp->status = cpu_to_le32((uint32_t)-EINVAL);
+            break;
+        }
+
+        /* No payload on the way back: FREE answers with its status alone. */
+        err = velocitor_free_block(s, freq);
+        if (err) {
+            resp->status = cpu_to_le32((uint32_t)err);
+        }
+        break;
+    }
+
+    case VEL_OP_STAT: {
+        struct VelocitorStatResp *sresp = (void *)(resp + 1);
+
+        velocitor_stat_fill(s, sresp);
+        resp_len += sizeof(*sresp);
+        break;
+    }
+
     default:
-        qemu_log_mask(LOG_UNIMP,
-                      "velocitor: control op %u -- not implemented (spec "
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "velocitor: control op %u -- no such operation (spec "
                       "7.2)\n", op);
         resp->status = cpu_to_le32((uint32_t)-ENOSYS);
         break;
@@ -2278,6 +2596,10 @@ static void velocitor_reset(DeviceState *dev)
     s->err_generation = 0;
     s->err_dropped = 0;
 
+    /* No session, no allocations: the handles of the boot that is over name
+     * nothing, and the numbering starts again at 1 (spec 6.5). */
+    velocitor_alloc_reset(s);
+
     /* The shadow table belongs to a boot that is over (spec 6.5). */
     s->rsc_addr_lo = 0;
     s->rsc_addr_hi = 0;
@@ -2324,6 +2646,19 @@ static void velocitor_reset(DeviceState *dev)
 
     msix_reset(PCI_DEVICE(s));
 }
+
+static const VMStateDescription vmstate_velocitor_alloc = {
+    .name = "velocitor/alloc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT64(offset, VelocitorAlloc),
+        VMSTATE_UINT64(size, VelocitorAlloc),
+        VMSTATE_UINT32(node, VelocitorAlloc),
+        VMSTATE_UINT32(live, VelocitorAlloc),
+        VMSTATE_END_OF_LIST()
+    },
+};
 
 static const VMStateDescription vmstate_velocitor_queue = {
     .name = "velocitor/queue",
@@ -2390,6 +2725,11 @@ static const VMStateDescription vmstate_velocitor = {
         VMSTATE_UINT32(trace_da, VelocitorState),
         VMSTATE_UINT32(trace_len, VelocitorState),
         VMSTATE_UINT64(trace_epoch, VelocitorState),
+        VMSTATE_UINT64_ARRAY(node_bump, VelocitorState, VEL_NODES),
+        VMSTATE_UINT32(next_handle, VelocitorState),
+        VMSTATE_UINT32(live_handles, VelocitorState),
+        VMSTATE_STRUCT_ARRAY(alloc, VelocitorState, VEL_MAX_HANDLES, 1,
+                             vmstate_velocitor_alloc, VelocitorAlloc),
         VMSTATE_UINT32(err_inject, VelocitorState),
         VMSTATE_UINT32(err_inject_arg, VelocitorState),
         VMSTATE_MSIX(parent_obj, VelocitorState),
