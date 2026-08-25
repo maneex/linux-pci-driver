@@ -11,6 +11,8 @@
 // Driver headers.
 #include "counters.h"
 #include "ctrl.h"
+#include "data-virtio.h"
+#include "data.h"
 #include "debugfs.h"
 #include "device.h"
 #include "dma.h"
@@ -129,6 +131,9 @@ static int velocitor_pci_probe(struct pci_dev *dev,
   if ((err = velocitor_ctrl_initialize(dev)))
     return err;
 
+  if ((err = velocitor_data_initialize(dev)))
+    return err;
+
   // Device trace.
   if ((err = velocitor_dtrace_initialize(dev)))
     return err;
@@ -179,10 +184,16 @@ static int __init init_(void) {
   if ((err = velocitor_ctrl_rpmsg_initialize()))
     goto error_class;
 
-  if ((err = pci_register_driver(&velocitor_pci_driver)))
+  if ((err = velocitor_data_virtio_initialize()))
     goto error_rpmsg;
 
+  if ((err = pci_register_driver(&velocitor_pci_driver)))
+    goto error_virtio;
+
   return 0;
+
+error_virtio:
+  velocitor_data_virtio_release();
 
 error_rpmsg:
   velocitor_ctrl_rpmsg_release();
@@ -207,6 +218,7 @@ static void __exit exit_(void) {
   pr_info("velocitor: unloading driver\n");
   pci_unregister_driver(&velocitor_pci_driver);
   velocitor_ctrl_rpmsg_release();
+  velocitor_data_virtio_release();
   class_destroy(class);
   debugfs_remove_recursive(velocitor_debugfs_root);
 }
