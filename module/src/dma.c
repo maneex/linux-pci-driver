@@ -25,7 +25,7 @@ static int velocitor_dma_dbg_(struct pci_dev *dev, u32 dir, u32 offset,
     return -EINVAL;
 
   // Write target address
-  u64 target = (device->dma.handle + pool_offset);
+  u64 target = (device->dma.mem.dma + pool_offset);
   mutex_lock(&device->dma.dbg_lock);
   writel(lower_32_bits(target), device->bar0 + VEL_REG_DBG_DMA_ADDR_LO);
   writel(upper_32_bits(target), device->bar0 + VEL_REG_DBG_DMA_ADDR_HI);
@@ -66,7 +66,7 @@ static ssize_t velocitor_dma_debugfs_pool_read(struct file *file,
   struct pci_dev *dev = file->private_data;
   struct velocitor_dev *device = pci_get_drvdata(dev);
 
-  return simple_read_from_buffer(buf, len, ppos, device->dma.cpu_addr,
+  return simple_read_from_buffer(buf, len, ppos, device->dma.mem.cpu,
                                  VEL_HOST_POOL_SIZE);
 }
 
@@ -76,7 +76,7 @@ static ssize_t velocitor_dma_debugfs_pool_write(struct file *file,
   struct pci_dev *dev = file->private_data;
   struct velocitor_dev *device = pci_get_drvdata(dev);
 
-  return simple_write_to_buffer(device->dma.cpu_addr, VEL_HOST_POOL_SIZE, ppos,
+  return simple_write_to_buffer(device->dma.mem.cpu, VEL_HOST_POOL_SIZE, ppos,
                                 buf, len);
 }
 
@@ -138,9 +138,9 @@ int velocitor_dma_initialize(struct pci_dev *dev) {
     return err;
   dev_info(&dev->dev, "dma: width %d bits", VEL_DMA_BITS);
 
-  device->dma.cpu_addr = dmam_alloc_coherent(&dev->dev, VEL_HOST_POOL_SIZE,
-                                             &device->dma.handle, GFP_KERNEL);
-  if (NULL == device->dma.cpu_addr)
+  device->dma.mem.cpu = dmam_alloc_coherent(&dev->dev, VEL_HOST_POOL_SIZE,
+                                            &device->dma.mem.dma, GFP_KERNEL);
+  if (NULL == device->dma.mem.cpu)
     return -ENOMEM;
 
   debugfs_create_file_size("dma_pool", 0600, device->debugfs, dev,

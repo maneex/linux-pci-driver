@@ -34,15 +34,8 @@ struct velocitor_dev {
     struct mutex lock;
   } counters;
 
-  /// Debug DMA engine.
-  struct {
-    // FIXME ! Replace by velocitor_dma_buf.
-    void *cpu_addr;
-    dma_addr_t handle;
-
-    /// Lock protecting \c mem access.
-    struct mutex dbg_lock;
-  } dma;
+  /// DMA engine.
+  struct velocitor_dma dma;
 
   /// Window
   struct {
