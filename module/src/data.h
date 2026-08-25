@@ -15,6 +15,7 @@
 #include "dma.h"
 
 struct velocitor_dev;
+struct velocitor_handle;
 
 struct velocitor_data_queue {
   struct velocitor_dma_buf mem;
@@ -34,5 +35,9 @@ void velocitor_data_complete(struct velocitor_dev *device,
                              size_t size);
 
 int velocitor_data_initialize(struct pci_dev *dev);
+
+int velocitor_data_copy(struct velocitor_dev *device, u32 engine, u16 op,
+                        struct velocitor_handle *block, u64 offset,
+                        dma_addr_t host_addr, u64 len);
 
 #endif // not VELOCITOR_DATA_H
