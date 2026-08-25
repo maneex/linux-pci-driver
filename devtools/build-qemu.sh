@@ -96,6 +96,7 @@ install_device() {
 
     install_source "$DEVICE_DIR/velocitor.c"      "$misc/velocitor.c"      || true
     install_source "$DEVICE_DIR/velocitor_hw.h"   "$misc/velocitor_hw.h"   || true
+    install_source "$DEVICE_DIR/velocitor_wire.h" "$misc/velocitor_wire.h" || true
 
     # meson glue.  The source-set variable was renamed between QEMU
     # releases (softmmu_ss -> system_ss in 8.x), so detect it rather than

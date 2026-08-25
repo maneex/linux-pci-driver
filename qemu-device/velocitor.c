@@ -69,6 +69,7 @@
 #include "standard-headers/linux/virtio_ring.h"
 
 #include "velocitor_hw.h"
+#include "velocitor_wire.h"
 
 #define TYPE_VELOCITOR "velocitor"
 OBJECT_DECLARE_SIMPLE_TYPE(VelocitorState, VELOCITOR)
@@ -1201,67 +1202,6 @@ struct VelocitorStatResp {
     uint32_t reserved;
 } QEMU_PACKED;
 
-/*
- * The data plane's wire format, spec section 8.3.
- *
- * In v1 the ring carries only the small command and response structures: the
- * data itself stays in the host's coherent pool and its bus address travels
- * inside the command. The device therefore reads and writes it directly, in
- * bus-master, rather than through a scatterlist -- section 8.3 explains that
- * putting a coherent buffer into a chain would have it remapped as a
- * streaming one, two DMA models mixed for nothing.
- */
-struct VelocitorHostRange {
-    uint64_t dma_addr;
-    uint64_t len;
-} QEMU_PACKED;
-
-struct VelocitorReqHdr {
-    uint32_t seq;
-    uint32_t generation;
-    uint16_t op;
-    uint16_t flags;
-    uint32_t reserved;
-} QEMU_PACKED;
-
-struct VelocitorCopyHdr {
-    uint32_t handle;
-    uint32_t reserved;
-    uint64_t dev_offset;
-    struct VelocitorHostRange host;
-} QEMU_PACKED;
-
-struct VelocitorGemmHdr {
-    uint32_t h_a, h_b, h_c;
-    uint32_t m, n, k;
-    uint32_t dtype;
-    uint32_t flags;
-    struct VelocitorHostRange host[3];
-} QEMU_PACKED;
-
-struct VelocitorResp {
-    uint32_t seq;
-    uint32_t status;
-    uint64_t cycles;
-    uint32_t far_accesses;
-    uint32_t engine;
-} QEMU_PACKED;
-
-/*
- * The layout above is the contract, so it is checked against it rather than
- * trusted: a field added here without the shared header moving stops this
- * build instead of becoming a disagreement visible only on the wire.
- */
-QEMU_BUILD_BUG_ON(sizeof(struct VelocitorHostRange) != VEL_HOST_RANGE_SIZE);
-QEMU_BUILD_BUG_ON(sizeof(struct VelocitorReqHdr) != VEL_REQ_HDR_SIZE);
-QEMU_BUILD_BUG_ON(sizeof(struct VelocitorCopyHdr) != VEL_COPY_HDR_SIZE);
-QEMU_BUILD_BUG_ON(sizeof(struct VelocitorGemmHdr) != VEL_GEMM_HDR_SIZE);
-QEMU_BUILD_BUG_ON(sizeof(struct VelocitorResp) != VEL_RESP_SIZE);
-QEMU_BUILD_BUG_ON(offsetof(struct VelocitorCopyHdr, dev_offset) !=
-                  VEL_COPY_HDR_OFF_DEV_OFFSET);
-QEMU_BUILD_BUG_ON(offsetof(struct VelocitorResp, cycles) !=
-                  VEL_RESP_OFF_CYCLES);
-
 /* Sizes the reply buffer, the way the driver's union does on its side. */
 union VelocitorCtrlResp {
     struct VelocitorInfoResp info;
@@ -1999,7 +1939,7 @@ static uint64_t velocitor_data_charge(VelocitorState *s, unsigned engine,
  * leaves something to read when a run goes wrong.
  */
 static int velocitor_data_copy(VelocitorState *s, unsigned q, uint16_t op,
-                               const struct VelocitorCopyHdr *hdr,
+                               const struct vel_copy_hdr *hdr,
                                uint64_t *cycles, uint32_t *far)
 {
     unsigned engine = velocitor_queue_engine(q);
@@ -2066,14 +2006,14 @@ static void velocitor_engine_drain(VelocitorState *s, unsigned q)
      * is 48, and a buffer cut to the current need would refuse the next
      * operation as a malformed descriptor.
      */
-    uint8_t buffer[sizeof(struct VelocitorReqHdr) +
-                   sizeof(struct VelocitorGemmHdr)];
+    uint8_t buffer[sizeof(struct vel_req_hdr) +
+                   sizeof(struct vel_gemm_hdr)];
     uint16_t head;
 
     while (velocitor_vq_pop_head(s, q, &head)) {
         struct vring_desc in, out;
-        struct VelocitorReqHdr req;
-        struct VelocitorResp resp;
+        struct vel_req_hdr req;
+        struct vel_resp resp;
         uint64_t cycles = 0;
         uint32_t far = 0;
         uint16_t op;
@@ -2131,13 +2071,13 @@ static void velocitor_engine_drain(VelocitorState *s, unsigned q)
             case VEL_DATA_OP_COPY_H2D:
             case VEL_DATA_OP_COPY_D2H:
                 if (le32_to_cpu(in.len) <
-                    sizeof(req) + sizeof(struct VelocitorCopyHdr)) {
+                    sizeof(req) + sizeof(struct vel_copy_hdr)) {
                     err = -EINVAL;
                     break;
                 }
                 err = velocitor_data_copy(
                     s, q, op,
-                    (const struct VelocitorCopyHdr *)(buffer + sizeof(req)),
+                    (const struct vel_copy_hdr *)(buffer + sizeof(req)),
                     &cycles, &far);
                 break;
 
