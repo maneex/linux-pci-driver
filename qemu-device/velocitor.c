@@ -1231,6 +1231,14 @@ struct VelocitorCopyHdr {
     struct VelocitorHostRange host;
 } QEMU_PACKED;
 
+struct VelocitorGemmHdr {
+    uint32_t h_a, h_b, h_c;
+    uint32_t m, n, k;
+    uint32_t dtype;
+    uint32_t flags;
+    struct VelocitorHostRange host[3];
+} QEMU_PACKED;
+
 struct VelocitorResp {
     uint32_t seq;
     uint32_t status;
@@ -1247,6 +1255,7 @@ struct VelocitorResp {
 QEMU_BUILD_BUG_ON(sizeof(struct VelocitorHostRange) != VEL_HOST_RANGE_SIZE);
 QEMU_BUILD_BUG_ON(sizeof(struct VelocitorReqHdr) != VEL_REQ_HDR_SIZE);
 QEMU_BUILD_BUG_ON(sizeof(struct VelocitorCopyHdr) != VEL_COPY_HDR_SIZE);
+QEMU_BUILD_BUG_ON(sizeof(struct VelocitorGemmHdr) != VEL_GEMM_HDR_SIZE);
 QEMU_BUILD_BUG_ON(sizeof(struct VelocitorResp) != VEL_RESP_SIZE);
 QEMU_BUILD_BUG_ON(offsetof(struct VelocitorCopyHdr, dev_offset) !=
                   VEL_COPY_HDR_OFF_DEV_OFFSET);
@@ -2051,8 +2060,14 @@ static int velocitor_data_copy(VelocitorState *s, unsigned q, uint16_t op,
  */
 static void velocitor_engine_drain(VelocitorState *s, unsigned q)
 {
+    /*
+     * Sized for the largest operation header of section 8.3, not for the
+     * largest one implemented today: a GEMM request is 96 bytes where a copy
+     * is 48, and a buffer cut to the current need would refuse the next
+     * operation as a malformed descriptor.
+     */
     uint8_t buffer[sizeof(struct VelocitorReqHdr) +
-                   sizeof(struct VelocitorCopyHdr)];
+                   sizeof(struct VelocitorGemmHdr)];
     uint16_t head;
 
     while (velocitor_vq_pop_head(s, q, &head)) {
