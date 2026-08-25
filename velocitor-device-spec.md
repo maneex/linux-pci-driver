@@ -1262,7 +1262,7 @@ struct vel_req_hdr {
 struct vel_copy_hdr {      /* suit vel_req_hdr pour COPY_*             */
     __le32 handle;
     __le32 reserved;
-    __le64 dev_offset;     /* position dans le DeviceBuffer            */
+    __le64 offset;         /* position DANS le DeviceBuffer            */
     struct vel_host_range host;
 };
 
@@ -1503,7 +1503,7 @@ traduit en `vel_host_range` à partir de sa propre allocation. Un `dma_addr_t` f
 l'application serait une primitive d'écriture arbitraire en mémoire physique.
 
 Validations obligatoires à l'entrée, toutes en arithmétique protégée du débordement :
-`m·k·sizeof(dtype)`, `k·n`, `m·n` contre les tailles des `DeviceBuffer` ; `dev_offset + len`
+`m·k·sizeof(dtype)`, `k·n`, `m·n` contre les tailles des `DeviceBuffer` ; `offset + len`
 contre la taille du handle ; appartenance de la plage hôte au pool ; concordance du dtype
 avec les features négociées ; génération ; non-aliasing A/B/C.
 
@@ -1995,6 +1995,7 @@ le projet doit permettre de formuler.
 | **étape 8** | **Les opérations du plan de données sont nommées `VEL_DATA_OP_*` dans l'en-tête partagé, alors que le §8.2 les numérote 1, 2, 3 comme celles du §7.2** | **les deux plans repartent de 1, et c'est le contrat — mais deux constantes valant 1 sous des noms voisins se relisent mal. Le préfixe rend le plan lisible sur place ; les valeurs sur le fil sont celles de la spec, inchangées** |
 | **étape 8** | **Le coût simulé d'une copie est forfaitaire par opération, `VEL_CYCLES_COPY`, indépendant du volume** | **le §A.5 dit « un coût forfaitaire par opération majoré de `VEL_FAR_PENALTY` pour les accès distants », et précise que ces grandeurs sont relatives. Un coût proportionnel à la taille donnerait l'illusion de modéliser une bande passante que l'annexe A.6 exclut explicitement de simuler. Ce qui doit rester mesurable, c'est l'écart entre deux placements, et il l'est** |
 | **étape 8** | **Une chaîne qui n'a pas exactement deux descripteurs — un en lecture, un en écriture — est une erreur *fatale* (`ERR_CODE = 1`), pas une réponse en erreur** | **le §8.3 fixe la chaîne à deux entrées. Un device qui devinerait la forme d'une chaîne qu'il ne comprend pas lirait de la mémoire hôte à une adresse que personne n'a choisie ; le §4.4 range précisément « descripteur mal formé » parmi les fatales, et la queue est alors inexploitable de toute façon** |
+| **étape 8** | **Le champ de `vel_copy_hdr` s'appelle `offset`, pas `dev_offset` (§8.3)** | **`dev_offset` désignait déjà autre chose dans le même protocole : celui de `vel_alloc_resp` (§7.2) est l'adresse *absolue* du bloc en mémoire device, celui de `vel_copy_hdr` une position *relative* à ce bloc. Deux référentiels sous un seul nom, à deux sections d'écart, c'est un décalage de la taille du bloc que rien ne signale — et la seule des deux valeurs que l'espace utilisateur manipule est la relative, puisque l'absolue ne franchit jamais l'UAPI** |
 | étape 6 | Une écriture de description sur une queue activée est refusée et journalisée | le §4.2 met `VQ_ENABLE` en dernier pour que la description soit complète au moment de l'activation. En accepter une ensuite reviendrait à laisser le device lire un anneau dont l'adresse change sous lui ; la refuser transforme un bug de driver en ligne de log |
 
 ### Décisions écartées, et pourquoi

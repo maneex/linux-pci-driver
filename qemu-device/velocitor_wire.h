@@ -54,7 +54,7 @@ struct vel_req_hdr {
 struct vel_copy_hdr {
     vel_le32 handle;
     vel_le32 reserved;
-    vel_le64 dev_offset; /* position within the DeviceBuffer */
+    vel_le64 offset;     /* position *within* the DeviceBuffer */
     struct vel_host_range host;
 } __attribute__((packed));
 

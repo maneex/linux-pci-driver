@@ -1943,7 +1943,7 @@ static int velocitor_data_copy(VelocitorState *s, unsigned q, uint16_t op,
                                uint64_t *cycles, uint32_t *far)
 {
     unsigned engine = velocitor_queue_engine(q);
-    uint64_t dev_offset = le64_to_cpu(hdr->dev_offset);
+    uint64_t offset = le64_to_cpu(hdr->offset);
     uint64_t iova = le64_to_cpu(hdr->host.dma_addr);
     uint64_t len = le64_to_cpu(hdr->host.len);
     const VelocitorAlloc *block;
@@ -1961,8 +1961,8 @@ static int velocitor_data_copy(VelocitorState *s, unsigned q, uint16_t op,
      * makes the model a peer that may lie, so neither side may take the
      * other's bounds on trust.
      */
-    if (uadd64_overflow(dev_offset, len, &end) || end > block->size) {
-        velocitor_error_qualify(s, VEL_ERR_OUT_OF_BOUNDS, dev_offset,
+    if (uadd64_overflow(offset, len, &end) || end > block->size) {
+        velocitor_error_qualify(s, VEL_ERR_OUT_OF_BOUNDS, offset,
                                 s->vq[q].notifyid, le32_to_cpu(hdr->handle));
         return -EINVAL;
     }
@@ -1973,8 +1973,10 @@ static int velocitor_data_copy(VelocitorState *s, unsigned q, uint16_t op,
 
     *cycles = velocitor_data_charge(s, engine, block->node, far);
 
+    /* block->offset is absolute, hdr->offset is relative to the block: the
+     * two are deliberately not the same name any more. */
     mem = (uint8_t *)memory_region_get_ram_ptr(&s->mem) + block->offset +
-          dev_offset;
+          offset;
 
     if (op == VEL_DATA_OP_COPY_H2D) {
         if (!velocitor_vq_host_read(s, q, iova, mem, len)) {

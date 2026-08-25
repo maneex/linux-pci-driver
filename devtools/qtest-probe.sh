@@ -674,7 +674,7 @@ CHECKS=(
     "req.generation = 2        |write 0x12b0004 4 0x02000000|"
     "req.op = COPY_H2D         |write 0x12b0008 2 0x0100|"
     "copy.handle = 2           |write 0x12b0010 4 0x02000000|"
-    "copy.dev_offset = 0       |write 0x12b0018 8 0x0000000000000000|"
+    "copy.offset = 0           |write 0x12b0018 8 0x0000000000000000|"
     "copy.host.dma_addr        |write 0x12b0020 8 0x00002d0100000000|"
     "copy.host.len = 8         |write 0x12b0028 8 0x0800000000000000|"
 

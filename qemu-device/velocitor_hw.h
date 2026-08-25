@@ -132,7 +132,7 @@
  *                           __le32 reserved; };
  *
  *     struct vel_copy_hdr { __le32 handle, reserved;
- *                           __le64 dev_offset;
+ *                           __le64 offset;
  *                           struct vel_host_range host; };
  *
  *     struct vel_gemm_hdr { __le32 h_a, h_b, h_c, m, n, k, dtype, flags;
@@ -163,7 +163,7 @@
 #define VEL_REQ_HDR_SIZE           0x10u
 
 #define VEL_COPY_HDR_OFF_HANDLE     0x00u
-#define VEL_COPY_HDR_OFF_DEV_OFFSET 0x08u
+#define VEL_COPY_HDR_OFF_OFFSET     0x08u
 #define VEL_COPY_HDR_OFF_HOST       0x10u
 #define VEL_COPY_HDR_SIZE           0x20u
 
